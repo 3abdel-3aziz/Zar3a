@@ -3602,6 +3602,7 @@ dependencies = [
     { name = "mistralai" },
     { name = "pydantic" },
     { name = "pytest" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -3610,6 +3611,7 @@ requires-dist = [
     { name = "mistralai", specifier = ">=2.10.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "requests", specifier = ">=2.34.2" },
 ]
 
 [[package]]

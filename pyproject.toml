@@ -9,6 +9,7 @@ dependencies = [
     "mistralai>=2.10.1",
     "pydantic>=2.13.5",
     "pytest>=9.1.1",
+    "requests>=2.34.2",
 ]
 
 [tool.pytest.ini_options]
