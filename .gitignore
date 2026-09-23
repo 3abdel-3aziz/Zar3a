@@ -44,8 +44,9 @@ venv.bak/
 *.sqlite3
 
 # --- Data Folders (Raw PDFs & Scraped files) ---
-Data/
 data/
+Data/
+*.pdf
 
 # --- IDE & OS Specific Files ---
 .vscode/
