@@ -46,7 +46,6 @@ venv.bak/
 # --- Data Folders (Raw PDFs & Scraped files) ---
 data/
 Data/
-*.pdf
 
 # --- IDE & OS Specific Files ---
 .vscode/
