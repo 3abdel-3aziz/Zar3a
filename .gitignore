@@ -54,3 +54,5 @@ Data/
 *.swo
 .DS_Store
 Thumbs.db
+
+.venv/
