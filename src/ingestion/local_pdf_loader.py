@@ -1,8 +1,10 @@
 from pathlib import Path
 # pyrefly: ignore [missing-import]
-from typing import List, Dict , Any 
+from typing import List, Dict, Any 
 
 import logging 
+# pyrefly: ignore [missing-import]
+from config import DATA_DIR
 
 
 logging.basicConfig(
@@ -20,9 +22,9 @@ class LocalPDFLoader:
     from a specified directory, preparing them as a batch queue for downstream OCR processing.  
     """    
 
-    def __init__(self, data_dir: str = "Data") -> None:
+    def __init__(self, data_dir: str | Path | None = None) -> None:
 
-        self.data_dir: Path = Path(data_dir)
+        self.data_dir: Path = Path(data_dir) if data_dir is not None else DATA_DIR
         self._validate_directory()
 
     def _validate_directory(self)-> None :

@@ -4,6 +4,8 @@ from pathlib import Path
 from mistralai.client import Mistral 
 
 import logging 
+# pyrefly: ignore [missing-import]
+from config import OUTPUT_JSON_DIR
 
 
 logging.basicConfig(
@@ -20,7 +22,7 @@ class MistralPDFProcessor:
     with built-in local caching to optimize costs and speed up development.
     """
     
-    def __init__(self, api_key: str | None = None, output_dir: str = "Data/processed_ocr"):        
+    def __init__(self, api_key: str | None = None, output_dir: str | Path | None = None):        
         """
         Initializes the Mistral client and ensures the output directory for JSON cache exists.
         """
@@ -31,9 +33,9 @@ class MistralPDFProcessor:
             raise ValueError("MISTRAL_API_KEY is missing. Please set it in your environment variables.")
 
         self.client = Mistral(api_key=self.api_key)    
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True , exist_ok=True)
-        logger.info(f"MistralPDFOCRProcessor initialized with cache directory: {self.output_dir}")
+        self.output_dir = Path(output_dir) if output_dir is not None else OUTPUT_JSON_DIR
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"MistralPDFProcessor initialized with cache directory: {self.output_dir}")
 
     def is_ocr_cached(self, pdf_path: str | Path) -> bool :       
         """
