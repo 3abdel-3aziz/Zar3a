@@ -13,6 +13,7 @@ All raw PDFs land in ARABIC_DATA_DIR  (Data/Arabic_Data/).
 """
 
 import sys
+import json
 import asyncio
 import logging
 from pathlib import Path
@@ -132,13 +133,17 @@ async def run_pdf_download(
 def run_ocr_processing(
     pdf_dir: Optional[Path] = None,
     json_output_dir: Optional[Path] = None,
+    ocr_engine: Optional[str] = None,
 ) -> List[Path]:
     """
     Stage 3 – OCR processing.
 
     Scans ``pdf_dir`` (defaults to ``ARABIC_DATA_DIR``) for PDF files,
-    runs each through ``MistralPDFProcessor``, and stores the resulting
-    JSON cache files in ``json_output_dir`` (defaults to ``OUTPUT_JSON_DIR``).
+    runs each through ``MistralPDFProcessor`` (defaulting to 'paddle' OCR engine),
+    and stores the resulting JSON cache files in ``json_output_dir`` (defaults to ``OUTPUT_JSON_DIR``).
+
+    Idempotent: if a JSON cache file already exists for a PDF it is counted as
+    a cache hit and returned immediately without re-running OCR.
 
     Returns the list of JSON ``Path`` objects that were produced or already cached.
     """
@@ -157,21 +162,49 @@ def run_ocr_processing(
             logger.info("Stage 3: No PDF files found to process.")
             return []
 
-        logger.info(f"Stage 3: {len(batch)} PDF(s) queued for OCR.")
-        ocr_processor = MistralPDFProcessor(output_dir=effective_json_dir)
+        logger.info(f"Stage 3: {len(batch)} PDF(s) found in source directory.")
+        ocr_processor = MistralPDFProcessor(output_dir=effective_json_dir, ocr_engine=ocr_engine)
         produced_jsons: List[Path] = []
+        pre_cached_count = 0
 
         for item in batch:
             pdf_path = Path(item["file_path"])
+
+            # ── Idempotency pre-flight check ──────────────────────────────────
+            # If the JSON output already exists, skip OCR entirely and collect
+            # the cached path. This makes repeated pipeline runs a no-op for
+            # already-processed files.
+            json_path = ocr_processor._get_expected_json_path(pdf_path)
+            if json_path.exists():
+                pre_cached_count += 1
+                logger.info(
+                    "Stage 3 [SKIP] Already cached – skipping OCR for: %s -> %s",
+                    pdf_path.name,
+                    json_path.name,
+                )
+                produced_jsons.append(json_path)
+                continue
+            # ──────────────────────────────────────────────────────────────────
+
             try:
                 ocr_processor.process_pdf(pdf_path)
-                json_path = ocr_processor._get_expected_json_path(pdf_path)
                 produced_jsons.append(json_path)
             except Exception as exc:
                 logger.error(f"OCR failed for {pdf_path.name}: {exc}")
                 continue
 
-        logger.info(f"Stage 3 complete. {len(produced_jsons)} JSON file(s) produced.")
+        stats = ocr_processor.get_processing_stats()
+        logger.info(
+            "Stage 3 complete. %d JSON file(s) available "
+            "(pre-cached: %d, cache_hits: %d, local_text: %d, paddle_ocr: %d, api_ocr: %d, failures: %d).",
+            len(produced_jsons),
+            pre_cached_count,
+            stats.get("cache_hits", 0),
+            stats.get("local_text_hits", 0),
+            stats.get("paddle_ocr_hits", 0),
+            stats.get("ocr_api_hits", 0),
+            stats.get("failures", 0),
+        )
         return produced_jsons
 
     except Exception as exc:
@@ -188,19 +221,14 @@ async def run_full_pipeline(
     pdf_max_pages: int = 5,
     pdf_output_dir: Optional[Path] = None,
     json_output_dir: Optional[Path] = None,
+    skip_scraping: bool = False,
+    ocr_engine: Optional[str] = None,
 ) -> dict:
     """
     Full ingestion pipeline orchestrator.
 
-    Executes stages 1 → 2 → 3 in sequence and returns a summary dict:
-
-    .. code-block:: python
-
-        {
-            "direct_text_json": Path | None,   # Stage 1 output
-            "downloaded_pdfs" : [Path, ...],   # Stage 2 outputs
-            "ocr_jsons"       : [Path, ...],   # Stage 3 outputs
-        }
+    Executes stages 1 → 2 → 3 in sequence (or skips stages 1 & 2 if skip_scraping=True)
+    and returns a summary dict.
     """
     effective_json_dir = json_output_dir or OUTPUT_JSON_DIR
     effective_pdf_dir = pdf_output_dir or ARABIC_DATA_DIR
@@ -209,23 +237,31 @@ async def run_full_pipeline(
     logger.info("   Zar3a Ingestion Pipeline – START    ")
     logger.info("========================================")
 
-    # Stage 1
-    direct_json = await run_direct_text_ingestion(
-        url=direct_text_url,
-        output_dir=effective_json_dir,
-    )
+    direct_json: Optional[Path] = None
+    downloaded_pdfs: List[Path] = []
 
-    # Stage 2
-    downloaded_pdfs = await run_pdf_download(
-        url=pagination_pdf_url,
-        pdf_output_dir=effective_pdf_dir,
-        max_pages=pdf_max_pages,
-    )
+    if not skip_scraping:
+        # Stage 1
+        direct_json = await run_direct_text_ingestion(
+            url=direct_text_url,
+            output_dir=effective_json_dir,
+        )
+
+        # Stage 2
+        downloaded_pdfs = await run_pdf_download(
+            url=pagination_pdf_url,
+            pdf_output_dir=effective_pdf_dir,
+            max_pages=pdf_max_pages,
+        )
+    else:
+        logger.info("Skipping Stage 1 (Direct Text Ingestion) & Stage 2 (PDF Download) as requested.")
+        logger.info(f"Proceeding directly to Stage 3 (OCR) using local PDF files in: {effective_pdf_dir}")
 
     # Stage 3
     ocr_jsons = run_ocr_processing(
         pdf_dir=effective_pdf_dir,
         json_output_dir=effective_json_dir,
+        ocr_engine=ocr_engine,
     )
 
     summary = {
@@ -237,11 +273,122 @@ async def run_full_pipeline(
     logger.info("========================================")
     logger.info("   Zar3a Ingestion Pipeline – DONE     ")
     logger.info(f"   Direct JSON  : {direct_json}")
-    logger.info(f"   PDFs         : {len(downloaded_pdfs)}")
+    logger.info(f"   PDFs Scraped : {len(downloaded_pdfs)}")
     logger.info(f"   OCR JSONs    : {len(ocr_jsons)}")
     logger.info("========================================")
 
     return summary
+
+
+# ── Data Normalization & Loader Helpers ─────────────────────────────────────
+
+def extract_text_from_json_data(raw_data: dict) -> str:
+    """
+    Extracts plain text or markdown from arbitrary JSON schemas
+    (Direct web scraping schema, Mistral OCR schema, or generic dictionary).
+    """
+    if not isinstance(raw_data, dict):
+        return ""
+
+    # 1. Direct Web Scraper format: {"source_type": "...", "data": {"title": "...", "content": "..."}}
+    if "data" in raw_data and isinstance(raw_data["data"], dict):
+        nested_data = raw_data["data"]
+        content = nested_data.get("content") or nested_data.get("full_text") or nested_data.get("text")
+        if content and isinstance(content, str):
+            return content
+
+    # 2. Direct keys in root
+    if "content" in raw_data and isinstance(raw_data["content"], str):
+        return raw_data["content"]
+    if "full_text" in raw_data and isinstance(raw_data["full_text"], str):
+        return raw_data["full_text"]
+    if "text" in raw_data and isinstance(raw_data["text"], str):
+        return raw_data["text"]
+
+    # 3. Mistral OCR format: {"pages": [{"markdown": "..."}, ...]}
+    if "pages" in raw_data and isinstance(raw_data["pages"], list):
+        markdown_pages: List[str] = []
+        for page in raw_data["pages"]:
+            if isinstance(page, dict) and "markdown" in page and isinstance(page["markdown"], str):
+                markdown_pages.append(page["markdown"])
+        if markdown_pages:
+            return "\n\n".join(markdown_pages)
+
+    return ""
+
+
+def parse_single_json_document(json_path: Path) -> dict:
+    """
+    Reads a single JSON file and extracts normalized document dictionary:
+    {
+        "doc_id": "...",
+        "file_name": "...",
+        "file_path": "...",
+        "full_text": "..."
+    }
+    """
+    json_path = Path(json_path)
+    if not json_path.exists():
+        raise FileNotFoundError(f"JSON file does not exist: {json_path}")
+
+    doc_id = json_path.stem
+    file_name = json_path.name
+    file_path = str(json_path.resolve())
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
+
+    full_text = extract_text_from_json_data(raw_data)
+    return {
+        "doc_id": doc_id,
+        "file_name": file_name,
+        "file_path": file_path,
+        "full_text": full_text,
+    }
+
+
+def load_and_normalize_ingested_documents(
+    json_dir: Optional[Path] = None,
+) -> List[dict]:
+    """
+    Reads all JSON output files from json_dir (defaults to OUTPUT_JSON_DIR),
+    normalizes their schemas into a clean list of document dictionaries ready for consumption:
+
+    [
+        {
+            "doc_id": "...",
+            "file_name": "...",
+            "file_path": "...",
+            "full_text": "..."
+        },
+        ...
+    ]
+    """
+    effective_dir = Path(json_dir or OUTPUT_JSON_DIR)
+    if not effective_dir.exists() or not effective_dir.is_dir():
+        logger.warning("JSON output directory '%s' does not exist or is not a directory.", effective_dir)
+        return []
+
+    json_files = list(effective_dir.glob("*.json"))
+    if not json_files:
+        logger.warning("No JSON files found in '%s' to load.", effective_dir)
+        return []
+
+    logger.info("Loading and normalizing %d JSON document(s) from '%s'...", len(json_files), effective_dir)
+    documents: List[dict] = []
+
+    for json_path in json_files:
+        try:
+            doc_dict = parse_single_json_document(json_path)
+            if doc_dict["full_text"].strip():
+                documents.append(doc_dict)
+            else:
+                logger.warning("Skipping '%s' as it contains no extractable text.", json_path.name)
+        except Exception as exc:
+            logger.error("Failed to read/normalize JSON file '%s': %s", json_path.name, exc)
+
+    logger.info("Successfully normalized %d valid document(s).", len(documents))
+    return documents
 
 
 # ── CLI execution ─────────────────────────────────────────────────────────────

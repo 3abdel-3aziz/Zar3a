@@ -56,3 +56,16 @@ Data/
 Thumbs.db
 
 .venv/
+*.db
+
+# MLflow & Outputs
+mlruns/
+outputs/
+models/
+*.pkl
+*.xgb
+*.bin
+
+# DVC (ignore actual data/cache, keep .dvc pointer files)
+/data/
+.dvc/cache/

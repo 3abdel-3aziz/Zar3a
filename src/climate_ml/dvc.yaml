@@ -1,0 +1,12 @@
+stages:
+  train_and_evaluate:
+    cmd: python train_pipeline.py
+    deps:
+      - train_pipeline.py
+      - src/trainer.py
+      - src/evaluation.py
+      - data/cairo_comprehensive_master_dataset.csv
+    params:
+      - conf/config.yaml
+    outs:
+      - mlruns

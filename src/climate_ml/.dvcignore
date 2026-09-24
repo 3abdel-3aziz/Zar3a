@@ -1,0 +1,9 @@
+# Ignore Python temporary cache files
+__pycache__/
+*.pyc
+
+# Ignore temporary log files generated during runtime
+*.log
+
+# Ignore local DVC cache directories if present within the folder
+.dvc/cache/

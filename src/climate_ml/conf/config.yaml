@@ -1,0 +1,35 @@
+project_name: "Zar3a-ClimateML"
+experiment_name: "tree_baseline"
+seed: 42
+
+data:
+  data_dir: "data"
+  processed_dir: "cairo_comprehensive_master_dataset.csv"
+  target_column: "mean_temperature"
+  test_size: 0.2
+  random_state: 42
+
+model:
+  model_name: "xgboost"
+
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+  lightgbm:
+    n_estimators: 100
+    max_depth: -1
+    num_leaves: 31
+    learning_rate: 0.1
+    subsample: 0.8
+
+  random_forest:
+    n_estimators: 100
+    max_depth: null
+    min_samples_split: 2
+    min_samples_leaf: 1
+
+  random_state: 42

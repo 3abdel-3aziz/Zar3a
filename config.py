@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import os 
 # Base Data Directory for raw inputs (PDFs, raw documents, etc.)
 DATA_DIR: Path = Path("Data")
 
@@ -30,3 +30,17 @@ PAGINATION_PDF_URL: str = (
     "https://manshurat.org/taxonomy/term/56"
     "?sort=search_api_aggregation_1%20DESC"
 )
+
+
+
+DEFAULT_DB_URL = "sqlite:///./Data/zar3a.db"
+
+class Settings:
+
+    DATABASE_URL: str = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
+
+    @property 
+    def is_sqlite(self)-> bool:
+        return self.DATABASE_URL.startswith("sqlite")
+
+settings = Settings()        
