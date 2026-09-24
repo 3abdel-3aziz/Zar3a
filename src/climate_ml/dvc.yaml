@@ -7,6 +7,6 @@ stages:
       - src/evaluation.py
       - data/cairo_comprehensive_master_dataset.csv
     params:
-      - conf/config.yaml
+      - conf/config.yaml:
     outs:
       - mlruns
