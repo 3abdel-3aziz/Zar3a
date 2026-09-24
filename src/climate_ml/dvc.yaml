@@ -8,5 +8,5 @@ stages:
       - data/cairo_comprehensive_master_dataset.csv
     params:
       - conf/config.yaml:
-    outs:
-      - mlruns
+    # MLflow artifacts are logged to the remote DagsHub server (not local mlruns/).
+    # No local outs are tracked for this stage.

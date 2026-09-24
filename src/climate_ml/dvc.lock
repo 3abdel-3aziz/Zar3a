@@ -1,0 +1,52 @@
+schema: '2.0'
+stages:
+  train_and_evaluate:
+    cmd: python train_pipeline.py
+    deps:
+    - path: data/cairo_comprehensive_master_dataset.csv
+      hash: md5
+      md5: ec2103c09c0ca9f6f18915e320831856
+      size: 48540
+    - path: src/evaluation.py
+      hash: md5
+      md5: 398243fe0b18baf4ea122b0fea60d41e
+      size: 5407
+    - path: src/trainer.py
+      hash: md5
+      md5: e5f7a314ebf175628fbce22d36ba7d61
+      size: 11466
+    - path: train_pipeline.py
+      hash: md5
+      md5: ffd148fd36062208b54103f5e2e82ff6
+      size: 3936
+    params:
+      conf/config.yaml:
+        data:
+          data_dir: data
+          processed_dir: cairo_comprehensive_master_dataset.csv
+          target_column: mean_temperature
+          test_size: 0.2
+          random_state: 42
+        experiment_name: tree_baseline
+        model:
+          model_name: xgboost
+          xgboost:
+            n_estimators: 100
+            max_depth: 6
+            learning_rate: 0.1
+            subsample: 0.8
+            colsample_bytree: 0.8
+          lightgbm:
+            n_estimators: 100
+            max_depth: -1
+            num_leaves: 31
+            learning_rate: 0.1
+            subsample: 0.8
+          random_forest:
+            n_estimators: 100
+            max_depth:
+            min_samples_split: 2
+            min_samples_leaf: 1
+          random_state: 42
+        project_name: Zar3a-ClimateML
+        seed: 42

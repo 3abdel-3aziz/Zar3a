@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Import DataPreprocessor and path resolver from trainer (reusable, single source of truth)
-from src.climate_ml.src.trainer import DataPreprocessor, resolve_data_path
+from .trainer import DataPreprocessor, resolve_data_path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

@@ -188,10 +188,10 @@ class EnvironmentalFeatureFetcher:
 class DataIngestionPipeline:
     """Orchestrates the entire data loading, processing, and saving pipeline."""
 
-    def __init__(self, place_names: List[str], output_path: str):
+    def __init__(self, place_names: List[str], output_path: str, cell_size: float = 0.01):
         self.place_names = place_names
         self.output_path = output_path
-        self.extractor = CairoGridExtractor(place_names)
+        self.extractor = CairoGridExtractor(place_names, cell_size=cell_size)
         self.env_fetcher = EnvironmentalFeatureFetcher("2025-01-01", "2025-12-31")
 
     def run(self) -> pd.DataFrame:
@@ -216,3 +216,94 @@ class DataIngestionPipeline:
         logger.info(f"Pipeline Complete! Dataset saved to '{self.output_path}' with shape: {master_df.shape}")
         
         return master_df
+
+    @classmethod
+    def generate_seed_dataset(cls, output_path: str, n_samples: int = 150) -> pd.DataFrame:
+        """Generates a realistic synthetic climate dataset to unblock pipeline testing without API rate limits."""
+        logger.info(f"Generating realistic seed dataset with {n_samples} samples at '{output_path}'...")
+        np.random.seed(42)
+        lats = np.random.uniform(29.8, 30.2, n_samples)
+        lons = np.random.uniform(31.1, 31.5, n_samples)
+        greenery_area = np.random.uniform(500, 25000, n_samples)
+        district_area = 100000.0
+        greenery_density = greenery_area / district_area
+        building_area = np.random.uniform(2000, 60000, n_samples)
+        building_density = building_area / district_area
+        avg_building_levels = np.random.uniform(2.0, 10.0, n_samples)
+        road_density = np.random.uniform(0.005, 0.05, n_samples)
+        distance_to_water = np.random.uniform(50, 5000, n_samples)
+        poi_density = np.random.uniform(0.001, 0.02, n_samples)
+        bare_ground_density = np.random.uniform(0.05, 0.4, n_samples)
+        mean_temperature = 22.0 + (building_density * 8.0) - (greenery_density * 4.0) + np.random.normal(0, 1.0, n_samples)
+        ndvi_mean = np.clip(0.3 - (building_density * 0.2) + (greenery_density * 0.4), 0.05, 0.8)
+        elevation = 30.0 + (lats - 30.0) * 400.0 + np.random.uniform(-5, 10, n_samples)
+        nighttime_lights_intensity = 10.0 + (road_density * 200.0) + (building_density * 15.0)
+        green_building_ratio = greenery_area / (building_area + 1e-6)
+
+        df = pd.DataFrame({
+            "district": ["Cairo"] * n_samples,
+            "grid_id": [f"Cairo_{i}" for i in range(n_samples)],
+            "lat": lats,
+            "lon": lons,
+            "greenery_area": greenery_area,
+            "greenery_density": greenery_density,
+            "building_area": building_area,
+            "building_density": building_density,
+            "avg_building_levels": avg_building_levels,
+            "road_density": road_density,
+            "distance_to_water": distance_to_water,
+            "poi_density": poi_density,
+            "bare_ground_density": bare_ground_density,
+            "mean_temperature": mean_temperature,
+            "ndvi_mean": ndvi_mean,
+            "elevation": elevation,
+            "nighttime_lights_intensity": nighttime_lights_intensity,
+            "green_building_ratio": green_building_ratio,
+        })
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        df.to_csv(output_path, index=False)
+        logger.info(f"Seed dataset saved successfully to '{output_path}' with shape: {df.shape}")
+        return df
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Zar3a Cairo Climate Data Ingestion Pipeline")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="data/cairo_comprehensive_master_dataset.csv",
+        help="Path where the CSV dataset will be saved.",
+    )
+    parser.add_argument(
+        "--place",
+        type=str,
+        default="Cairo Governorate, Egypt",
+        help="Place name or region to geocode via OpenStreetMap.",
+    )
+    parser.add_argument(
+        "--cell-size",
+        type=float,
+        default=0.03,
+        help="Grid cell size in degrees (default: 0.03).",
+    )
+    parser.add_argument(
+        "--quick-seed",
+        action="store_true",
+        help="Instantly generate a realistic synthetic seed dataset to unblock local training/DVC without external API calls.",
+    )
+
+    args = parser.parse_args()
+
+    if args.quick_seed:
+        DataIngestionPipeline.generate_seed_dataset(args.output)
+    else:
+        pipeline = DataIngestionPipeline(
+            place_names=[args.place],
+            output_path=args.output,
+            cell_size=args.cell_size,
+        )
+        pipeline.run()

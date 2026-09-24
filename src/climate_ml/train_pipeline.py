@@ -5,6 +5,19 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 import mlflow
+from dotenv import load_dotenv
+
+# Load .env from repo root so MLFLOW_TRACKING_URI, AWS credentials, etc. are available
+_REPO_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(dotenv_path=_REPO_ENV, override=False)
+
+# Fix Windows cp1256 locale crashing on MLflow's emoji-containing run URL output
+import sys as _sys
+import io as _io
+if hasattr(_sys.stdout, 'buffer'):
+    _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace')
+    _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace')
+os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 # Ensure repo root and src root are available in sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -13,8 +26,12 @@ for p in (REPO_ROOT, SRC_ROOT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from src.climate_ml.src.trainer import ModelTrainer, MLflowTracker
-from src.climate_ml.src.evaluation import ModelEvaluator
+try:
+    from src.trainer import ModelTrainer, MLflowTracker
+    from src.evaluation import ModelEvaluator
+except ImportError:
+    from src.climate_ml.src.trainer import ModelTrainer, MLflowTracker
+    from src.climate_ml.src.evaluation import ModelEvaluator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -30,6 +47,14 @@ class TrainingPipeline:
     def run(self) -> None:
         logger.info(f"Starting Training Pipeline for project: {self.config.project_name}")
         logger.info(f"Active Experiment: {self.config.experiment_name}")
+
+        # Apply remote MLflow tracking URI from env (DagsHub) if configured
+        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+            logger.info(f"MLflow tracking URI set to: {tracking_uri}")
+        else:
+            logger.warning("MLFLOW_TRACKING_URI not set — logging to local mlruns/")
 
         mlflow.set_experiment(self.config.experiment_name)
 
