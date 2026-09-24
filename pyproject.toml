@@ -3,7 +3,7 @@ name = "zar3a"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11, <3.13"
 dependencies = [
     "crawl4ai>=0.9.3",
     "dvc>=3.67.1",
@@ -19,19 +19,26 @@ dependencies = [
     "paddlepaddle==2.6.2",
     "pandas>=2.3.3",
     "pydantic>=2.13.5",
+    "pydantic-settings>=2.0.0",
     "pymupdf>=1.28.2",
     "pypdf>=6.19.0",
     "pytest>=9.1.1",
+    "python-dotenv>=1.0.0",
+    "qdrant-client>=1.13.0",
     "requests>=2.34.2",
+    "sentence-transformers>=3.0.0",
     "shapely>=2.1.2",
     "sqlalchemy>=2.0.54",
+    "torch>=2.0.0",
     "tqdm>=4.70.1",
+    "transformers>=4.40.0",
     "xgboost>=3.2.0",
 ]
+
+
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
 
 [tool.pyright]
 extraPaths = [".", "src"]
-
