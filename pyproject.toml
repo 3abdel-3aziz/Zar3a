@@ -30,6 +30,7 @@ dependencies = [
     "requests>=2.34.2",
     "sentence-transformers>=3.0.0",
     "shapely>=2.1.2",
+    "slowapi>=0.1.10",
     "sqlalchemy>=2.0.54",
     "torch>=2.0.0",
     "tqdm>=4.70.1",
@@ -40,7 +41,13 @@ dependencies = [
 
 
 [tool.pytest.ini_options]
-pythonpath = [".", "src"]
+pythonpath = [".", "back_end", "back_end/src", "src"]
 
 [tool.pyright]
-extraPaths = [".", "src"]
+extraPaths = [".", "back_end", "back_end/src", "src"]
+
+[tool.pyrefly]
+# Teach pyrefly where the back_end source packages live.
+# back_end/src is the import root for: agent, api, climate_ml,
+# rag_database, recommendation_system, and chunkers.
+search_path = ["back_end/src", "back_end"]
