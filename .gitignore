@@ -46,7 +46,7 @@ venv.bak/
 # --- Data Folders (Raw PDFs & Scraped files) ---
 data/
 Data/
-
+src/recommendation_system/data/
 # --- IDE & OS Specific Files ---
 .vscode/
 .idea/
