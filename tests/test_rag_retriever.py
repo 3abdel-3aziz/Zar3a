@@ -26,6 +26,7 @@ def sample_candidates():
             "score": 0.95,
             "payload": {
                 "chunk_id": 101,
+                "chunk_text": "Water conservation in agriculture through drip irrigation and mulching.",
                 "content": "Water conservation in agriculture through drip irrigation and mulching.",
                 "doc_id": 10,
                 "file_name": "irrigation_guide.pdf",
@@ -41,6 +42,7 @@ def sample_candidates():
             "score": 0.85,
             "payload": {
                 "chunk_id": 102,
+                "chunk_text": "Citrus tree cultivation in arid and semi-arid climates.",
                 "content": "Citrus tree cultivation in arid and semi-arid climates.",
                 "doc_id": 11,
                 "file_name": "citrus_trees.pdf",
@@ -56,6 +58,7 @@ def sample_candidates():
             "score": 0.75,
             "payload": {
                 "chunk_id": 103,
+                "chunk_text": "الزراعة المستدامة وإدارة الموارد المائية في مصر في بيئة جافة.",
                 "content": "الزراعة المستدامة وإدارة الموارد المائية في مصر في بيئة جافة.",
                 "doc_id": 12,
                 "file_name": "egypt_agriculture.pdf",

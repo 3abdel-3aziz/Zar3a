@@ -10,12 +10,13 @@ Security layers:
   2. Rate Limiting via slowapi — 60 requests / minute per IP
   3. Security Headers Middleware — X-Content-Type-Options, X-Frame-Options, X-XSS-Protection
 """
-
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict
+
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
       1. CORS Middleware
       2. Rate Limiting — 60 req/min per IP (slowapi + SlowAPIMiddleware)
       3. Security Headers — X-Content-Type-Options, X-Frame-Options, X-XSS-Protection
+      4. Prometheus Metrics — /metrics endpoint via prometheus-fastapi-instrumentator
     """
     app = FastAPI(
         title="Zar3a Urban Resilience & Greening API",
@@ -156,6 +158,13 @@ def create_app() -> FastAPI:
     app.include_router(recommendations_router, prefix="/api/v1/recommendations", tags=["Tree Recommendations"])
     app.include_router(climate_router, prefix="/api/v1/climate", tags=["Climate Prediction"])
     app.include_router(knowledge_router, prefix="/api/v1/knowledge", tags=["Knowledge & RAG"])
+
+    # ------------------------------------------------------------------
+    # 4. Prometheus Metrics Endpoint — /metrics
+    #    Instruments all routes and exposes the Prometheus scrape endpoint.
+    #    Prometheus service in docker-compose.yml scrapes backend:8000/metrics.
+    # ------------------------------------------------------------------
+    Instrumentator().instrument(app).expose(app)
 
     # ------------------------------------------------------------------
     # Health & Root Endpoints

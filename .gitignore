@@ -38,7 +38,13 @@ venv.bak/
 .env
 !.env.example
 
-# --- Databases (SQLite local files) ---
+# --- Test & Coverage Cache ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Databases (SQLite / DuckDB local files) ---
 *.db
 *.sqlite
 *.sqlite3
@@ -47,6 +53,7 @@ venv.bak/
 data/
 Data/
 src/recommendation_system/data/
+
 # --- IDE & OS Specific Files ---
 .vscode/
 .idea/
@@ -55,10 +62,7 @@ src/recommendation_system/data/
 .DS_Store
 Thumbs.db
 
-.venv/
-*.db
-
-# MLflow & Outputs
+# --- MLflow & Experiment Tracking ---
 mlruns/
 outputs/
 models/
@@ -66,6 +70,35 @@ models/
 *.xgb
 *.bin
 
-# DVC (ignore actual data/cache, keep .dvc pointer files)
+# --- DVC (ignore actual data/cache, keep .dvc pointer files) ---
 /data/
 .dvc/cache/
+
+# ============================================================
+# VECTOR DATABASE LOCAL STORAGE
+# ============================================================
+# Qdrant on-disk storage (exclusive OS lock — must never be committed)
+qdrant_storage/
+
+# ============================================================
+# MODEL WEIGHTS & ML CACHES
+# ============================================================
+# HuggingFace hub cache (model weights, tokenizers, blobs)
+.cache/
+# Common model weight formats
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.h5
+*.onnx
+*.incomplete
+# Sentence-Transformers local downloads
+sentence_transformers/
+
+# ============================================================
+# RUNTIME / TEMPORARY FILES
+# ============================================================
+temp_resp.json
+*.tmp
+*.temp

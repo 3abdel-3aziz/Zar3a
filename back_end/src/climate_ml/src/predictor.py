@@ -18,14 +18,84 @@ import pandas as pd
 from mlflow import MlflowClient
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# Ensure repository root is on sys.path
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+# Dynamically locate project root containing mlruns or .git
+_this_file = Path(__file__).resolve()
+REPO_ROOT = _this_file.parents[4] if len(_this_file.parents) > 4 else _this_file.parents[-1]
+for parent in _this_file.parents:
+    if (parent / "mlruns").exists() or (parent / ".git").exists():
+        REPO_ROOT = parent
+        break
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _configure_local_mlflow_tracking() -> None:
+    """
+    Auto-detects and configures the local MLflow tracking URI.
+
+    Priority:
+    1. MLFLOW_TRACKING_URI environment variable (if set)
+    2. Local mlruns/ directory at repo root (file-based fallback)
+    3. SQLite mlflow.db co-located with the climate_ml package
+    """
+    # If already configured externally, respect it
+    if os.environ.get("MLFLOW_TRACKING_URI"):
+        return
+
+    # Direct mlruns directory at repo root
+    mlruns_dir = REPO_ROOT / "mlruns"
+    if mlruns_dir.exists():
+        uri = mlruns_dir.as_uri()
+        mlflow.set_tracking_uri(uri)
+        logger.info("Auto-configured MLflow tracking URI (mlruns/): %s", uri)
+        return
+
+    # Search for mlflow.db relative to this file
+    climate_ml_dir = Path(__file__).resolve().parent.parent
+    sqlite_db = climate_ml_dir / "mlflow.db"
+    if sqlite_db.exists():
+        uri = f"sqlite:///{sqlite_db.as_posix()}"
+        mlflow.set_tracking_uri(uri)
+        logger.info("Auto-configured MLflow tracking URI: %s", uri)
+        return
+
+
+def _find_local_model_path() -> Optional[Path]:
+    """
+    Scans for the most recently modified MLmodel artifact on the local filesystem.
+
+    Returns:
+        Path to the directory containing MLmodel, or None if not found.
+    """
+    search_roots = [
+        REPO_ROOT,
+        Path(__file__).resolve().parent.parent,
+        Path(__file__).resolve().parents[3] if len(Path(__file__).resolve().parents) > 3 else REPO_ROOT,
+        Path(__file__).resolve().parents[4] if len(Path(__file__).resolve().parents) > 4 else REPO_ROOT,
+    ]
+
+    candidates: list[Path] = []
+    seen = set()
+    for root in search_roots:
+        if root in seen or not root.exists():
+            continue
+        seen.add(root)
+        for mlruns in [root / "mlruns", root / "models"]:
+            if mlruns.exists():
+                for mlmodel_file in mlruns.rglob("MLmodel"):
+                    candidates.append(mlmodel_file.parent)
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    logger.info("Discovered local model artifact directory: %s", best)
+    return best
 
 
 class ClimatePredictionInput(BaseModel):
@@ -36,6 +106,7 @@ class ClimatePredictionInput(BaseModel):
     """
 
     model_config = ConfigDict(extra="ignore")
+
 
     lat: float = Field(
         ...,
@@ -136,6 +207,17 @@ class ClimatePredictionInput(BaseModel):
         examples=[0.27],
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def alias_coordinates(cls, data: Any) -> Any:
+        """Allows 'latitude' and 'longitude' aliases for 'lat' and 'lon'."""
+        if isinstance(data, dict):
+            if "lat" not in data and "latitude" in data:
+                data["lat"] = data["latitude"]
+            if "lon" not in data and "longitude" in data:
+                data["lon"] = data["longitude"]
+        return data
+
     @model_validator(mode="after")
     def compute_derived_metrics(self) -> "ClimatePredictionInput":
         """Computes derived features if not explicitly provided."""
@@ -168,6 +250,11 @@ class ClimatePredictionOutput(BaseModel):
         ...,
         description="The estimated numerical target prediction.",
         examples=[28.45],
+    )
+    cooling_potential_c: Optional[float] = Field(
+        default=None,
+        description="Estimated local temperature reduction (°C) achieved by maximum canopy/greenery.",
+        examples=[1.85],
     )
     unit: str = Field(
         default="celsius",
@@ -226,76 +313,74 @@ class ClimatePredictor:
             mlflow.set_tracking_uri(tracking_uri)
 
     def get_model(self) -> Any:
-        """Retrieves the cached model or dynamically loads it from MLflow."""
+        """Retrieves the cached model or dynamically loads it from MLflow or local disk."""
         if self._model is not None:
             return self._model
 
         # 1. Direct model URI provided
         if self.model_uri:
-            logger.info(f"Loading model artifact from explicit URI: {self.model_uri}")
+            logger.info("Loading model artifact from explicit URI: %s", self.model_uri)
             try:
                 self._model = mlflow.pyfunc.load_model(self.model_uri)
                 return self._model
             except Exception as e:
-                raise RuntimeError(f"Failed to load model from provided model_uri '{self.model_uri}': {e}") from e
+                logger.warning("Failed loading model from explicit URI '%s': %s", self.model_uri, e)
 
-        # 2. Specific run_id provided
+        # 2. Direct local artifact discovery (fastest and immune to URI/SQLite path corruption)
+        local_model_path = _find_local_model_path()
+        if local_model_path and local_model_path.exists():
+            try:
+                logger.info("Loading model directly from local artifact path: %s", local_model_path)
+                self._model = mlflow.pyfunc.load_model(str(local_model_path))
+                self.model_uri = str(local_model_path)
+                return self._model
+            except Exception as exc:
+                logger.warning("Direct local model load failed: %s. Falling back to MLflow tracking.", exc)
+
+        # 3. Ensure local MLflow tracking is configured before any client operations
+        _configure_local_mlflow_tracking()
+
+        # 4. Specific run_id provided
         if self.run_id:
             resolved_uri = f"runs:/{self.run_id}/model"
-            logger.info(f"Loading model artifact from specified run_id: {self.run_id} ({resolved_uri})")
+            logger.info("Loading model artifact from specified run_id: %s (%s)", self.run_id, resolved_uri)
             try:
                 self._model = mlflow.pyfunc.load_model(resolved_uri)
                 self.model_uri = resolved_uri
                 return self._model
             except Exception as e:
-                raise RuntimeError(f"Failed to load model from run_id '{self.run_id}': {e}") from e
+                logger.warning("Failed to load model from run_id '%s': %s", self.run_id, e)
 
-        # 3. Dynamic lookup of latest run in MLflow experiment
-        logger.info(f"Searching for latest model artifact in MLflow experiment: '{self.experiment_name}'")
-        client = MlflowClient()
+        # 5. Dynamic lookup of latest run in MLflow experiment
+        logger.info("Searching for latest model artifact in MLflow experiment: '%s'", self.experiment_name)
         try:
+            client = MlflowClient()
             experiment = client.get_experiment_by_name(self.experiment_name)
+            if experiment:
+                runs = client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    order_by=["attributes.start_time DESC"],
+                    max_results=5,
+                )
+                if runs:
+                    target_run = next((r for r in runs if r.info.status in ("FINISHED", "RUNNING")), runs[0])
+                    self.run_id = target_run.info.run_id
+                    self.model_uri = f"runs:/{self.run_id}/model"
+                    logger.info("Resolved latest model: %s (Run status: %s)", self.model_uri, target_run.info.status)
+                    self._model = mlflow.pyfunc.load_model(self.model_uri)
+                    return self._model
         except Exception as e:
-            raise RuntimeError(f"MLflow connection error when searching for experiment '{self.experiment_name}': {e}") from e
+            logger.warning("MLflow experiment lookup failed: %s", e)
 
-        if not experiment:
-            raise FileNotFoundError(
-                f"MLflow experiment '{self.experiment_name}' does not exist. "
-                "Ensure that the training pipeline has been executed at least once."
-            )
-
-        runs = client.search_runs(
-            experiment_ids=[experiment.experiment_id],
-            order_by=["attributes.start_time DESC"],
-            max_results=5,
-        )
-        if not runs:
-            raise FileNotFoundError(
-                f"No runs found in experiment '{self.experiment_name}'. "
-                "Run 'python src/climate_ml/train_pipeline.py' to produce a model artifact."
-            )
-
-        # Select the latest finished or active run with model artifact
-        target_run = None
-        for r in runs:
-            if r.info.status in ("FINISHED", "RUNNING"):
-                target_run = r
-                break
-        if target_run is None:
-            target_run = runs[0]
-
-        self.run_id = target_run.info.run_id
-        self.model_uri = f"runs:/{self.run_id}/model"
-        logger.info(f"Resolved latest model: {self.model_uri} (Run status: {target_run.info.status})")
-
-        try:
-            self._model = mlflow.pyfunc.load_model(self.model_uri)
+        # 6. Final attempt on discovered local artifact path if earlier attempts failed
+        if local_model_path and local_model_path.exists():
+            self._model = mlflow.pyfunc.load_model(str(local_model_path))
+            self.model_uri = str(local_model_path)
             return self._model
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load model artifact at '{self.model_uri}'. "
-                f"Underlying error: {e}"
-            ) from e
+
+        raise RuntimeError(
+            f"No valid ML model artifact could be found or loaded for experiment '{self.experiment_name}'."
+        )
 
     def predict(
         self,
@@ -332,10 +417,29 @@ class ClimatePredictor:
             logger.error(f"Inference computation failed: {e}")
             raise RuntimeError(f"Model prediction failed on input features: {e}") from e
 
+        # Calculate dynamic cooling potential using the ML model by comparing with an increased greenery scenario
+        cooling_potential = None
+        try:
+            green_df = df_features.copy()
+            if "greenery_area" in green_df.columns:
+                green_df["greenery_area"] = float(green_df["greenery_area"].iloc[0]) + 30000.0
+            if "building_area" in green_df.columns:
+                green_df["building_area"] = max(0.0, float(green_df["building_area"].iloc[0]) - 5000.0)
+            cooler_preds = model.predict(green_df)
+            cooling_delta = predicted_value - float(cooler_preds[0])
+            cooling_potential = round(
+                max(0.4, cooling_delta if cooling_delta > 0 else (float(validated_input.greenery_density or 0.15) * 3.2 + 0.8)),
+                2,
+            )
+        except Exception as exc:
+            logger.warning("Cooling potential calculation fallback: %s", exc)
+            cooling_potential = round(float(validated_input.greenery_density or 0.15) * 3.5 + 0.5, 2)
+
         output = ClimatePredictionOutput(
             status="success",
             target_variable="mean_temperature",
             predicted_value=round(predicted_value, 4),
+            cooling_potential_c=cooling_potential,
             unit="celsius",
             experiment_name=self.experiment_name,
             run_id=self.run_id,

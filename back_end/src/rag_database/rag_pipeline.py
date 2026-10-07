@@ -82,7 +82,11 @@ class RAGIngestionPipeline:
                         "vector_id": vector_id,
                         "chunk_hash": item["chunk_hash"],
                         "chunk_index": item["chunk_index"],
+                        # Store under both keys for schema consistency:
+                        # "content" is the canonical key; "chunk_text" is kept
+                        # as an alias so legacy retriever code continues to work.
                         "content": item["content"],
+                        "chunk_text": item["content"],
                         "doc_id": item["doc_id"],
                         "file_name": item["file_name"],
                         "file_path": item["file_path"],

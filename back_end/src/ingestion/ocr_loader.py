@@ -11,6 +11,11 @@
 import os
 os.environ["FLAGS_use_mkldnn"] = "0"
 os.environ["FLAGS_enable_pir_api"] = "0"
+# On Windows, PyTorch must initialize before PaddlePaddle to avoid OpenMP/MKL DLL conflict (WinError 127)
+try:
+    import torch
+except Exception:
+    torch = None
 # ──────────────────────────────────────────────────────────────────────────────
 
 """
@@ -47,15 +52,9 @@ try:
 except ImportError:
     pymupdf = None
 
-try:
-    from paddleocr import PaddleOCR
-except ImportError:
-    PaddleOCR = None
-
-try:
-    from mistralai.client import Mistral
-except ImportError:
-    Mistral = None
+# PaddleOCR and Mistral are lazily imported only if requested, saving startup time and memory
+PaddleOCR = None
+Mistral = None
 
 # pyrefly: ignore [missing-import]
 from config import OUTPUT_JSON_DIR
@@ -90,7 +89,7 @@ class LocalPDFTextExtractor:
         Returns a dictionary payload matching Zar3a OCR schema if digital text is found,
         or None if the PDF is scanned / empty of selectable text.
         """
-        if not self.is_pypdf_available():
+        if pypdf is None or not self.is_pypdf_available():
             logger.debug("pypdf is not available. Skipping local PDF text pre-check.")
             return None
 
@@ -150,6 +149,14 @@ class PaddleOCRExtractor:
         # use_angle_cls is the correct constructor param in paddleocr 2.x.
         self.use_angle_cls = use_angle_cls
 
+        global PaddleOCR
+        if PaddleOCR is None:
+            try:
+                from paddleocr import PaddleOCR as _PaddleOCR
+                PaddleOCR = _PaddleOCR
+            except ImportError:
+                PaddleOCR = None
+
         if PaddleOCR is None:
             raise RuntimeError("paddleocr package is not installed. Install via `uv add paddleocr`.")
 
@@ -206,6 +213,194 @@ class PaddleOCRExtractor:
             return {
                 "pages": extracted_pages,
                 "source": "paddle_ocr_local",
+            }
+        finally:
+            doc.close()
+
+
+# ── 2b. Surya OCR Local Extractor (Pure In-Process PyTorch) ─────────────────
+
+try:
+    import surya.model.recognition.config
+    # Patch for transformers compatibility with surya config
+    if hasattr(surya.model.recognition.config, "SuryaOCRConfig"):
+        surya.model.recognition.config.SuryaOCRConfig.has_no_defaults_at_init = True
+        surya.model.recognition.config.SuryaOCRConfig.get_text_config = lambda self, *args, **kwargs: self.decoder
+    from surya.ocr import run_ocr
+    from surya.model.detection.model import load_model as load_det_model, load_processor as load_det_processor
+    from surya.model.recognition.model import load_model as load_rec_model
+    from surya.model.recognition.processor import load_processor as load_rec_processor
+except (ImportError, OSError, Exception):
+    run_ocr = None
+    load_det_model = None
+    load_det_processor = None
+    load_rec_model = None
+    load_rec_processor = None
+
+try:
+    from PIL import Image as PILImage
+except ImportError:
+    PILImage = None
+
+
+class SuryaOCRExtractor:
+    """
+    Local offline OCR engine using Surya OCR (pure in-process PyTorch).
+
+    Key advantages:
+      - 100% native execution on the host machine (CPU or CUDA GPU).
+      - Zero Docker containers, zero background server daemons.
+      - 90+ language support including Arabic and English.
+      - Extracts lines in reading order with bounding boxes and confidence scores.
+
+    Output schema matches the Zar3a standard:
+      {"pages": [{"index": int, "markdown": str}], "source": "surya_ocr_local"}
+    """
+
+    def __init__(
+        self,
+        dpi: int = 200,
+        langs: Optional[List[str]] = None,
+        device: Optional[str] = None,
+        backend: Optional[str] = None,
+    ):
+        """
+        Args:
+            dpi: Resolution for rendering PDF pages to images (default: 200).
+            langs: List of language codes to recognize (default: ['ar', 'en']).
+            device: 'cpu' or 'cuda'. If None, auto-detected.
+            backend: Ignored; Surya now runs purely native PyTorch without external servers.
+        """
+        self.dpi = dpi
+        self.langs = langs or ["ar", "en"]
+        self.device = device or ("cuda" if (torch is not None and torch.cuda.is_available()) else "cpu")
+
+        if run_ocr is None or load_det_model is None or load_rec_model is None:
+            raise RuntimeError(
+                "surya-ocr package is not installed. Install via `uv add 'surya-ocr<0.8'`."
+            )
+        if PILImage is None:
+            raise RuntimeError(
+                "Pillow package is not installed. Install via `uv add Pillow`."
+            )
+        if pymupdf is None:
+            raise RuntimeError(
+                "pymupdf package is not installed. Install via `uv add pymupdf`."
+            )
+
+        logger.info(
+            "Initializing native in-process Surya OCR on device '%s' (langs=%s)...",
+            self.device,
+            self.langs,
+        )
+        self._det_model = load_det_model(device=self.device)
+        self._det_processor = load_det_processor()
+        self._rec_model = load_rec_model(device=self.device)
+        self._rec_processor = load_rec_processor()
+        logger.info("Surya OCR native PyTorch models loaded successfully.")
+
+    @staticmethod
+    def _blocks_to_markdown(blocks) -> str:
+        """
+        Converts Surya OCR blocks/lines into clean markdown.
+        """
+        text_parts: List[str] = []
+        for block in blocks:
+            if getattr(block, "skipped", False) or getattr(block, "error", False):
+                continue
+
+            content = getattr(block, "html", None)
+            if not isinstance(content, str) or not content.strip():
+                raw_text = getattr(block, "text", "")
+                content = raw_text if isinstance(raw_text, str) else ""
+
+            content = content.strip()
+            if not content:
+                continue
+
+            label = getattr(block, "label", "Text") or "Text"
+            label = str(label)
+            if label in ("SectionHeader", "PageHeader"):
+                text_parts.append(f"## {content}")
+            elif label == "Caption":
+                text_parts.append(f"*{content}*")
+            else:
+                text_parts.append(content)
+
+        return "\n\n".join(text_parts)
+
+    def extract_text(self, pdf_path: Path) -> Dict[str, Any]:
+        """
+        Renders PDF pages to images using PyMuPDF, runs Surya OCR on each page natively,
+        and returns the structured OCR payload matching Zar3a schema.
+
+        Args:
+            pdf_path: Path to the PDF file to process.
+
+        Returns:
+            dict with keys: "pages" (list of {index, markdown}), "source".
+        """
+        pdf_path = Path(pdf_path)
+        if pymupdf is None:
+            raise RuntimeError("pymupdf is not installed. Install via `uv add pymupdf`.")
+        if PILImage is None:
+            raise RuntimeError("Pillow is not installed. Install via `uv add Pillow`.")
+
+        doc = pymupdf.open(str(pdf_path))
+        extracted_pages: List[Dict[str, Any]] = []
+
+        logger.info(
+            "Surya OCR processing file: %s (%d page(s), dpi=%d)",
+            pdf_path.name, len(doc), self.dpi,
+        )
+
+        try:
+            for page_idx, page in enumerate(doc):
+                # Render PDF page to PIL Image via PyMuPDF pixmap
+                pix = page.get_pixmap(dpi=self.dpi)
+                # Convert pixmap bytes -> PIL Image (RGB)
+                img = PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+                logger.info(
+                    "Surya OCR: running native recognition on page %d/%d of '%s'...",
+                    page_idx + 1, len(doc), pdf_path.name,
+                )
+
+                # Run native in-process Surya OCR
+                predictions = run_ocr(
+                    images=[img],
+                    langs=[self.langs],
+                    det_model=self._det_model,
+                    det_processor=self._det_processor,
+                    rec_model=self._rec_model,
+                    rec_processor=self._rec_processor,
+                )
+
+                page_result = predictions[0] if predictions else None
+                text_lines = getattr(page_result, "text_lines", []) if page_result else []
+
+                lines = [
+                    getattr(line, "text", "").strip()
+                    for line in text_lines
+                    if getattr(line, "text", "").strip()
+                ]
+                page_markdown = "\n".join(lines)
+
+                extracted_pages.append({
+                    "index": page_idx,
+                    "markdown": page_markdown,
+                })
+
+                logger.debug(
+                    "Surya OCR page %d/%d: %d lines, %d chars",
+                    page_idx + 1, len(doc),
+                    len(lines), len(page_markdown),
+                )
+
+            logger.info("Surya OCR completed successfully for: %s", pdf_path.name)
+            return {
+                "pages": extracted_pages,
+                "source": "surya_ocr_local",
             }
         finally:
             doc.close()
@@ -282,7 +477,15 @@ class APIKeyPoolManager:
         remaining_times = [max(0.0, unlock - now) for unlock in self.cooldowns.values()]
         return min(remaining_times) if remaining_times else 0.0
 
-    def create_client(self, index: int) -> Mistral:
+    def create_client(self, index: int) -> Any:
+        global Mistral
+        if Mistral is None:
+            try:
+                from mistralai.client import Mistral as _Mistral
+                Mistral = _Mistral
+            except ImportError:
+                Mistral = None
+
         if Mistral is None:
             raise RuntimeError("mistralai package is not installed.")
         return Mistral(api_key=self.api_keys[index])
@@ -372,6 +575,8 @@ class MistralOCRClient:
                 key_index = self.pool.get_available_key_index() or 0
 
             client = self.pool.create_client(key_index)
+            if client is None:
+                raise RuntimeError("Failed to initialize Mistral client.")
             masked_key = self.pool.mask_key(key_index)
 
             try:
@@ -434,8 +639,9 @@ class MistralPDFProcessor:
       1. Local JSON Cache check
       2. Local Digital PDF text extraction (0 API tokens via pypdf)
       3. Multi-engine OCR execution:
-         - 'paddle' (default offline local OCR via PaddleOCR)
-         - 'mistral' (API-based OCR via Mistral AI)
+         - 'surya'   (recommended: local VLM-based OCR via Surya OCR v2)
+         - 'paddle'  (offline local OCR via PaddleOCR – deprecated, slow)
+         - 'mistral' (API-based OCR via Mistral AI – requires paid access)
     """
 
     def __init__(
@@ -451,10 +657,11 @@ class MistralPDFProcessor:
         inter_file_delay: float = 1.0,
         min_char_threshold: int = 100,
         paddle_lang: str = "ar",
+        surya_backend: Optional[str] = None,
     ):
-        # Resolve OCR Engine precedence: constructor param -> env var OCR_ENGINE -> 'paddle'
+        # Resolve OCR Engine precedence: constructor param -> env var OCR_ENGINE -> 'surya'
         env_engine = os.getenv("OCR_ENGINE")
-        self.ocr_engine = (ocr_engine or env_engine or "paddle").lower()
+        self.ocr_engine = (ocr_engine or env_engine or "surya").lower()
 
         self.output_dir = Path(output_dir) if output_dir is not None else OUTPUT_JSON_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -463,12 +670,17 @@ class MistralPDFProcessor:
         # Sub-component initializations
         self.local_extractor = LocalPDFTextExtractor(min_char_threshold=min_char_threshold)
 
-        if self.ocr_engine == "paddle":
+        # Initialize sub-components based on selected engine
+        self.paddle_extractor = None
+        self.surya_extractor = None
+        self.pool_manager = None
+        self.ocr_client = None
+
+        if self.ocr_engine == "surya":
+            self.surya_extractor = SuryaOCRExtractor(dpi=200, backend=surya_backend)
+        elif self.ocr_engine == "paddle":
             self.paddle_extractor = PaddleOCRExtractor(lang=paddle_lang)
-            self.pool_manager = None
-            self.ocr_client = None
         elif self.ocr_engine == "mistral":
-            self.paddle_extractor = None
             raw_keys = api_key or os.getenv("MISTRAL_API_KEY") or os.getenv("MISTRAL_API_KEYS")
             if isinstance(raw_keys, list):
                 keys_list = [k.strip() for k in raw_keys if k and isinstance(k, str) and k.strip()]
@@ -490,12 +702,13 @@ class MistralPDFProcessor:
                 backoff_factor=backoff_factor,
             )
         else:
-            raise ValueError(f"Invalid ocr_engine '{self.ocr_engine}'. Allowed choices: 'paddle', 'mistral'.")
+            raise ValueError(f"Invalid ocr_engine '{self.ocr_engine}'. Allowed choices: 'surya', 'paddle', 'mistral'.")
 
         # Statistics tracking
         self.stats = {
             "cache_hits": 0,
             "local_text_hits": 0,
+            "surya_ocr_hits": 0,
             "paddle_ocr_hits": 0,
             "ocr_api_hits": 0,
             "failures": 0,
@@ -534,7 +747,7 @@ class MistralPDFProcessor:
         Processes a single PDF file:
           1. Checks local JSON cache first.
           2. Performs local digital PDF pre-check (0 API tokens / 0 OCR runtime if text is available).
-          3. Executes selected OCR engine ('paddle' default, or 'mistral' API).
+          3. Executes selected OCR engine ('surya', 'paddle', or 'mistral').
           4. Enforces inter-file throttling in finally block.
         """
         pdf_path = Path(pdf_path)
@@ -555,7 +768,19 @@ class MistralPDFProcessor:
                 return local_result
 
             # 3. OCR Engine Processing
-            if self.ocr_engine == "paddle":
+            if self.ocr_engine == "surya":
+                if self.surya_extractor is None:
+                    raise RuntimeError("Surya OCR extractor is not initialized.")
+                logger.info("Running Surya OCR v2 engine for file: %s", pdf_path.name)
+                ocr_response = self.surya_extractor.extract_text(pdf_path)
+                self._save_to_cache(pdf_path, ocr_response)
+                self.stats["surya_ocr_hits"] += 1
+                logger.info("Successfully processed and cached Surya OCR for: %s", pdf_path.name)
+                return ocr_response
+
+            elif self.ocr_engine == "paddle":
+                if self.paddle_extractor is None:
+                    raise RuntimeError("Paddle OCR extractor is not initialized.")
                 logger.info("Running PaddleOCR engine for file: %s", pdf_path.name)
                 ocr_response = self.paddle_extractor.extract_text(pdf_path)
                 self._save_to_cache(pdf_path, ocr_response)
@@ -564,6 +789,8 @@ class MistralPDFProcessor:
                 return ocr_response
 
             elif self.ocr_engine == "mistral":
+                if self.ocr_client is None:
+                    raise RuntimeError("Mistral OCR client is not initialized.")
                 logger.info("Calling Mistral OCR API for file: %s", pdf_path.name)
                 ocr_response = self.ocr_client.execute_ocr(pdf_path)
                 self._save_to_cache(pdf_path, ocr_response)

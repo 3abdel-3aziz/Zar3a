@@ -30,6 +30,7 @@ from src.agent.config import (
     DEFAULT_LANGUAGE,
     KNOWLEDGE_LLM_MODEL,
     KNOWLEDGE_TEMPERATURE,
+    build_chat_llm,
 )
 from src.agent.state import AgentState
 from src.rag_database.retriever import RAGRetriever
@@ -46,24 +47,27 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 
 # Default number of chunks to retrieve for knowledge grounding
-DEFAULT_TOP_K: int = 5
+DEFAULT_TOP_K: int = 8
 
 # ---------------------------------------------------------------------------
 # System Prompt for Knowledge Synthesis
 # ---------------------------------------------------------------------------
 _KNOWLEDGE_SYSTEM_PROMPT = """\
-أنت متخصص المعرفة والتشريعات البيئية في منصة "زرعة" (Zar3a) للبنية الحضرية والتخضير في مصر.
+أنت مستشار التوثيق والمعرفة القانونية والاستراتيجية والبيئية لمنصة "زرعة" (Zar3a) في مصر.
 
-مهمتك تقديم إجابات دقيقة وموثقة ومحترفة على الأسئلة المتعلقة بـ:
-- التشريعات البيئية المصرية وقوانين الغابات والمراسيم الوزارية (مثال: قانون البيئة رقم 4/1994).
-- إرشادات التباعد البلدية، ضوابط مرافق الطرق العامة، وتشريعات تشجير الأرصفة.
-- التصنيف النباتي والخصائص البيئية ومعايير التخضير الحضري.
+مهمتك تقديم إجابة دقيقة ومباشرة وموثقة على استفسار المستخدم بالاعتماد التام على الوثائق الرسمية والقرارات والاستراتيجيات المسترجعة من قاعدة المعرفة.
+
+مجالات الاختصاص:
+- التشريعات البيئية المصرية (قانون البيئة 4/1994، قانون الري 147/2021، اللائحة التنفيذية).
+- الاستراتيجيات الوطنية (مثل: الاستراتيجية الوطنية لتغير المناخ 2050، قرارات المجلس الوطني للتغيرات المناخية).
+- ضوابط التباعد والتنظيم الإداري والبلدي والالتزامات الدولية.
 
 ضوابط الإجابة:
-1. **اللغة العربية أولاً**: يجب أن تكون الإجابة باللغة العربية الفصحى الاحترافية في جميع الأحوال. استخدم الإنجليزية فقط إذا طلب المستخدم صراحةً.
-2. **التقيد بالمصادر**: ابني إجابتك على "السياق المسترجع" بالكامل. لا تخترع أرقاماً للقوانين أو تفاصيل غير واردة في السياق.
-3. **استشهاد صريح**: استخدم الصيغة [Document X: اسم الملف] لكل وثيقة محتج بها.
-4. إذا كان السياق غير كافٍ للإجابة بشكل كامل، أوضح ما هو متاح وما هو مفقود بصراحة.
+1. **اللغة العربية أولاً**: يجب أن تكون الإجابة باللغة العربية الفصحى السليمة والمهنية.
+2. **التقيد الدقيق بالمصادر**: استند حصراً إلى "السياق المسترجع" المرفق. لا تخترع نصوصاً أو قرارات غير واردة بالسياق.
+3. **استشهاد صريح**: اذكر اسم الوثيقة أو القرار لكل نقطة رئيسية بصيغة [Document X: اسم الوثيقة].
+4. **التركيز التام على سؤال المستخدم**: أجب على صلب السؤال دون الخروج لموضوعات زراعية أو ترشيحات أشجار ما لم يطلب المستخدم ذلك صراحة.
+5. إذا كان السياق المسترجع جزئياً أو غير كامل، بيّن ما هو متاح بوضوح وأمانة علمية.
 """
 
 
@@ -137,24 +141,25 @@ def _generate_fallback_synthesis(
 
     for idx, chunk in enumerate(chunks, start=1):
         meta = chunk.get("metadata", {}) or {}
-        file_name = meta.get("file_name") or f"Doc #{idx}"
+        raw_name = meta.get("file_name") or f"وثيقة #{idx}"
+        file_label = raw_name.replace(".json", "").replace(".pdf", "")
         chunk_idx = meta.get("chunk_index")
-        label = f"{file_name}" + (f" (Chunk {chunk_idx})" if chunk_idx is not None else "")
+        label = f"{file_label}" + (f" (فقرة {chunk_idx})" if chunk_idx is not None else "")
         snippet = str(chunk.get("content", "")).strip()
-        if len(snippet) > 280:
-            snippet = snippet[:280] + "..."
-        citations.append(f"• **[Document {idx}: {label}]**\n  {snippet}")
+        if len(snippet) > 650:
+            snippet = snippet[:650] + "..."
+        citations.append(f"📄 **[وثيقة {idx}]: {label}**\n{snippet}")
 
-    citations_block = "\n\n".join(citations)
+    citations_block = "\n\n---\n\n".join(citations)
 
     if is_english:
         return (
-            f"Based on the official documents retrieved from the Zar3a knowledge base, "
-            f"here are the relevant legal and environmental excerpts:\n\n{citations_block}"
+            f"Based on authoritative documents retrieved from the Zar3a knowledge base, "
+            f"here are the relevant legal, strategic, and regulatory provisions:\n\n{citations_block}"
         )
     return (
-        f"بناءً على الوثائق والمراجع الرسمية المسترجعة من قاعدة معرفة 'زرعة'، "
-        f"إليك أهم البنود والمقتطفات المتعلقة باستفسارك:\n\n{citations_block}"
+        f"بناءً على الوثائق الرسمية والقرارات الصادرة والمسترجعة من قاعدة معرفة 'زرعة'، "
+        f"إليك أهم البنود والمقتطفات الموثقة المتعلقة باستفسارك:\n\n{citations_block}"
     )
 
 
@@ -167,11 +172,21 @@ _knowledge_llm_instance: Optional[Any] = None
 
 
 def get_retriever() -> RAGRetriever:
-    """Returns the cached RAGRetriever singleton, instantiating it lazily if needed."""
+    """Returns the cached RAGRetriever singleton, instantiating it lazily if needed.
+    
+    If the previous initialization failed, retries on next call to handle
+    transient Qdrant lock conflicts (e.g., during reingest pipeline).
+    """
     global _retriever_instance
     if _retriever_instance is None:
         logger.info("Initializing RAGRetriever for knowledge_node...")
-        _retriever_instance = RAGRetriever()
+        try:
+            _retriever_instance = RAGRetriever()
+            logger.info("RAGRetriever initialized successfully.")
+        except Exception as exc:
+            logger.error("Failed to initialize RAGRetriever: %s. Will retry on next request.", exc)
+            # Don't cache failure — retry on next invocation
+            raise
     return _retriever_instance
 
 
@@ -181,27 +196,34 @@ def set_retriever(retriever: Optional[RAGRetriever]) -> None:
     _retriever_instance = retriever
 
 
-def _build_knowledge_llm(model: Optional[str] = None, api_key: Optional[str] = None) -> Any:
-    """Constructs the LLM client for knowledge response synthesis using config settings."""
-    selected_model = model or KNOWLEDGE_LLM_MODEL
-    openai_key = api_key or os.getenv("OPENAI_API_KEY")
-
-    kwargs: Dict[str, Any] = {
-        "model": selected_model,
-        "temperature": KNOWLEDGE_TEMPERATURE,
-    }
-    if openai_key:
-        kwargs["api_key"] = openai_key
-
-    return ChatOpenAI(**kwargs)
+def _build_knowledge_llm(model: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Any]:
+    """Constructs the LLM client for knowledge response synthesis using unified factory."""
+    return build_chat_llm(
+        model=model or KNOWLEDGE_LLM_MODEL,
+        temperature=KNOWLEDGE_TEMPERATURE,
+        api_key=api_key,
+    )
 
 
-def get_knowledge_llm() -> Any:
-    """Returns the cached LLM singleton, instantiating it lazily if needed."""
+def get_knowledge_llm() -> Optional[Any]:
+    """Returns the cached LLM singleton, initializing via build_chat_llm.
+    
+    If LLM was previously unavailable (None), re-attempts initialization
+    to allow Ollama to come online without requiring a server restart.
+    """
     global _knowledge_llm_instance
     if _knowledge_llm_instance is None:
-        logger.info("Initializing knowledge synthesis LLM (model=%s, temperature=%.1f).", KNOWLEDGE_LLM_MODEL, KNOWLEDGE_TEMPERATURE)
-        _knowledge_llm_instance = _build_knowledge_llm()
+        try:
+            _knowledge_llm_instance = _build_knowledge_llm()
+            if _knowledge_llm_instance:
+                logger.info("Knowledge synthesis LLM ready.")
+            else:
+                logger.info("No LLM available; knowledge node will use structured document synthesis.")
+                # Don't cache None permanently — allow retry next invocation
+                return None
+        except Exception as exc:
+            logger.warning("Could not initialize knowledge LLM: %s", exc)
+            return None
     return _knowledge_llm_instance
 
 
@@ -274,9 +296,9 @@ def knowledge_node(
 
     # 2. Retrieve document chunks via hybrid retriever
     chunks: List[Dict[str, Any]] = []
-    active_retriever = retriever if retriever is not None else get_retriever()
 
     try:
+        active_retriever = retriever if retriever is not None else get_retriever()
         top_k = int(os.getenv("KNOWLEDGE_TOP_K", str(DEFAULT_TOP_K)))
         chunks = active_retriever.retrieve(query=query_text, top_k=top_k)
         logger.info(
@@ -293,37 +315,76 @@ def knowledge_node(
         )
         chunks = []
 
-    # 3. Format retrieved context for state and LLM prompting
-    formatted_context = format_rag_context(chunks)
+    # 3. Filter out chunks with empty or whitespace-only content
+    #    (Caused by: payload key mismatch or garbled OCR producing empty strings)
+    usable_chunks = [c for c in chunks if str(c.get("content", "")).strip()]
+    if chunks and not usable_chunks:
+        logger.warning(
+            "KnowledgeNode: %d chunk(s) retrieved but ALL have empty content. "
+            "This likely indicates a Qdrant payload key mismatch or garbled OCR data. "
+            "Falling back to no-context response.",
+            len(chunks),
+        )
+    elif len(usable_chunks) < len(chunks):
+        logger.info(
+            "KnowledgeNode: filtered %d/%d chunk(s) with empty content.",
+            len(chunks) - len(usable_chunks),
+            len(chunks),
+        )
 
-    # 4. Synthesize AI response citing sources
+    # 4. Format retrieved context for state and LLM prompting
+    formatted_context = format_rag_context(usable_chunks)
+
+    # 5. Synthesize AI response citing sources
     ai_content = ""
     active_llm = llm if llm is not None else get_knowledge_llm()
 
-    try:
-        user_prompt = (
-            f"User Inquiry:\n{query_text}\n\n"
-            f"Retrieved Context from Zar3a Knowledge Base:\n{formatted_context}\n\n"
-            f"Please synthesize an authoritative, well-structured answer strictly grounded "
-            f"in the context above, citing each document or decree referenced."
-        )
+    if active_llm is not None:
+        try:
+            if usable_chunks:
+                context_section = formatted_context
+                grounding_instruction = (
+                    "Please synthesize an authoritative, well-structured answer strictly grounded "
+                    "in the context above, citing each document or decree referenced."
+                )
+            else:
+                context_section = (
+                    "⚠️ لم يتم استرجاع أي محتوى نصي قابل للقراءة من قاعدة المعرفة لهذا الاستفسار. "
+                    "قد يكون السبب بيانات غير مكتملة أو مشكلة في فهرسة المستندات. "
+                    "WARNING: The knowledge base returned no readable text for this query. "
+                    "Do NOT invent laws, decrees, or document contents. "
+                    "Inform the user honestly that no relevant documents were found."
+                )
+                grounding_instruction = (
+                    "Since no grounding context was retrieved, you MUST honestly inform the user "
+                    "that no relevant legal or regulatory documents were found in the knowledge base "
+                    "for their specific query. Do NOT fabricate laws, articles, or provisions."
+                )
 
-        prompt_messages = [
-            SystemMessage(content=_KNOWLEDGE_SYSTEM_PROMPT),
-            HumanMessage(content=user_prompt),
-        ]
+            user_prompt = (
+                f"User Inquiry:\n{query_text}\n\n"
+                f"Retrieved Context from Zar3a Knowledge Base:\n{context_section}\n\n"
+                f"{grounding_instruction}"
+            )
 
-        response = active_llm.invoke(prompt_messages)
-        ai_content = response.content if hasattr(response, "content") else str(response)
-        logger.info("Successfully synthesized grounded knowledge response (%d chars).", len(ai_content))
+            prompt_messages = [
+                SystemMessage(content=_KNOWLEDGE_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
 
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "LLM synthesis failed in KnowledgeNode: %s. Using structured fallback synthesis.",
-            exc,
-            exc_info=True,
-        )
-        ai_content = _generate_fallback_synthesis(query=query_text, chunks=chunks, language=language)
+            response = active_llm.invoke(prompt_messages)
+            ai_content = response.content if hasattr(response, "content") else str(response)
+            logger.info("Successfully synthesized grounded knowledge response (%d chars).", len(ai_content))
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "LLM synthesis failed in KnowledgeNode: %s. Using structured fallback synthesis.",
+                exc,
+            )
+            ai_content = _generate_fallback_synthesis(query=query_text, chunks=usable_chunks, language=language)
+    else:
+        logger.info("Synthesizing grounded knowledge response from retrieved document chunks.")
+        ai_content = _generate_fallback_synthesis(query=query_text, chunks=usable_chunks, language=language)
 
     # 5. Return partial state update
     return {

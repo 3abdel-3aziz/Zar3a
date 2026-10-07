@@ -19,6 +19,8 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
+from .arabic_text_normalizer import normalize_arabic_text
+
 # ── Path bootstrap ────────────────────────────────────────────────────────────
 # Ensures the project root (D:\ITI\Zar3a) is on sys.path so that `config`
 # and `src.*` are importable whether this file is run directly
@@ -134,12 +136,13 @@ def run_ocr_processing(
     pdf_dir: Optional[Path] = None,
     json_output_dir: Optional[Path] = None,
     ocr_engine: Optional[str] = None,
+    surya_backend: Optional[str] = None,
 ) -> List[Path]:
     """
     Stage 3 – OCR processing.
 
     Scans ``pdf_dir`` (defaults to ``ARABIC_DATA_DIR``) for PDF files,
-    runs each through ``MistralPDFProcessor`` (defaulting to 'paddle' OCR engine),
+    runs each through ``MistralPDFProcessor`` (defaulting to 'surya' OCR engine),
     and stores the resulting JSON cache files in ``json_output_dir`` (defaults to ``OUTPUT_JSON_DIR``).
 
     Idempotent: if a JSON cache file already exists for a PDF it is counted as
@@ -163,7 +166,11 @@ def run_ocr_processing(
             return []
 
         logger.info(f"Stage 3: {len(batch)} PDF(s) found in source directory.")
-        ocr_processor = MistralPDFProcessor(output_dir=effective_json_dir, ocr_engine=ocr_engine)
+        ocr_processor = MistralPDFProcessor(
+            output_dir=effective_json_dir,
+            ocr_engine=ocr_engine,
+            surya_backend=surya_backend,
+        )
         produced_jsons: List[Path] = []
         pre_cached_count = 0
 
@@ -196,11 +203,12 @@ def run_ocr_processing(
         stats = ocr_processor.get_processing_stats()
         logger.info(
             "Stage 3 complete. %d JSON file(s) available "
-            "(pre-cached: %d, cache_hits: %d, local_text: %d, paddle_ocr: %d, api_ocr: %d, failures: %d).",
+            "(pre-cached: %d, cache_hits: %d, local_text: %d, surya_ocr: %d, paddle_ocr: %d, api_ocr: %d, failures: %d).",
             len(produced_jsons),
             pre_cached_count,
             stats.get("cache_hits", 0),
             stats.get("local_text_hits", 0),
+            stats.get("surya_ocr_hits", 0),
             stats.get("paddle_ocr_hits", 0),
             stats.get("ocr_api_hits", 0),
             stats.get("failures", 0),
@@ -223,6 +231,7 @@ async def run_full_pipeline(
     json_output_dir: Optional[Path] = None,
     skip_scraping: bool = False,
     ocr_engine: Optional[str] = None,
+    surya_backend: Optional[str] = None,
 ) -> dict:
     """
     Full ingestion pipeline orchestrator.
@@ -262,6 +271,7 @@ async def run_full_pipeline(
         pdf_dir=effective_pdf_dir,
         json_output_dir=effective_json_dir,
         ocr_engine=ocr_engine,
+        surya_backend=surya_backend,
     )
 
     summary = {
@@ -285,36 +295,48 @@ async def run_full_pipeline(
 def extract_text_from_json_data(raw_data: dict) -> str:
     """
     Extracts plain text or markdown from arbitrary JSON schemas
-    (Direct web scraping schema, Mistral OCR schema, or generic dictionary).
+    (Direct web scraping schema, Mistral OCR schema, Surya OCR schema, or
+    generic dictionary) and applies Arabic text normalisation to fix the
+    reversed/mirrored character output produced by Surya OCR on CPU.
     """
     if not isinstance(raw_data, dict):
         return ""
+
+    raw_text: str = ""
 
     # 1. Direct Web Scraper format: {"source_type": "...", "data": {"title": "...", "content": "..."}}
     if "data" in raw_data and isinstance(raw_data["data"], dict):
         nested_data = raw_data["data"]
         content = nested_data.get("content") or nested_data.get("full_text") or nested_data.get("text")
         if content and isinstance(content, str):
-            return content
+            raw_text = content
 
     # 2. Direct keys in root
-    if "content" in raw_data and isinstance(raw_data["content"], str):
-        return raw_data["content"]
-    if "full_text" in raw_data and isinstance(raw_data["full_text"], str):
-        return raw_data["full_text"]
-    if "text" in raw_data and isinstance(raw_data["text"], str):
-        return raw_data["text"]
+    if not raw_text:
+        if "content" in raw_data and isinstance(raw_data["content"], str):
+            raw_text = raw_data["content"]
+        elif "full_text" in raw_data and isinstance(raw_data["full_text"], str):
+            raw_text = raw_data["full_text"]
+        elif "text" in raw_data and isinstance(raw_data["text"], str):
+            raw_text = raw_data["text"]
 
-    # 3. Mistral OCR format: {"pages": [{"markdown": "..."}, ...]}
-    if "pages" in raw_data and isinstance(raw_data["pages"], list):
+    # 3. Mistral / Surya OCR page format: {"pages": [{"markdown": "..."}, ...]}
+    if not raw_text and "pages" in raw_data and isinstance(raw_data["pages"], list):
         markdown_pages: List[str] = []
         for page in raw_data["pages"]:
             if isinstance(page, dict) and "markdown" in page and isinstance(page["markdown"], str):
                 markdown_pages.append(page["markdown"])
         if markdown_pages:
-            return "\n\n".join(markdown_pages)
+            raw_text = "\n\n".join(markdown_pages)
 
-    return ""
+    if not raw_text:
+        return ""
+
+    # ── Arabic normalisation ────────────────────────────────────────────────
+    # Fix reversed/mirrored Arabic characters produced by Surya OCR on CPU.
+    # normalize_arabic_text() is a no-op for non-Arabic (English/numbers-only)
+    # lines, so this is safe to apply unconditionally to all document sources.
+    return normalize_arabic_text(raw_text)
 
 
 def parse_single_json_document(json_path: Path) -> dict:

@@ -1,9 +1,18 @@
 import os
+from pathlib import Path
 from typing import Optional
-from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
+from pydantic import model_validator
+from pydantic_settings import BaseSettings
 
-load_dotenv()
+_BASE_DIR = Path(__file__).resolve().parent.parent.parent  # back_end
+_REPO_ROOT = _BASE_DIR.parent if (_BASE_DIR.parent / ".env").exists() else _BASE_DIR
+
+# Load .env from repo root first, then back_end if present
+if (_REPO_ROOT / ".env").exists():
+    load_dotenv(_REPO_ROOT / ".env")
+if (_BASE_DIR / ".env").exists():
+    load_dotenv(_BASE_DIR / ".env")
 
 
 class RAGSettings(BaseSettings):
@@ -29,9 +38,18 @@ class RAGSettings(BaseSettings):
     CANDIDATE_POOL_MULTIPLIER: int = 4
 
     model_config = {
-        "env_file": ".env",
+        "env_file": str(_REPO_ROOT / ".env") if (_REPO_ROOT / ".env").exists() else ".env",
         "extra": "ignore",
     }
 
+    @model_validator(mode="after")
+    def resolve_local_path(self) -> "RAGSettings":
+        if self.QDRANT_LOCAL_PATH:
+            p = Path(self.QDRANT_LOCAL_PATH)
+            if not p.is_absolute():
+                self.QDRANT_LOCAL_PATH = str((_REPO_ROOT / p).resolve())
+        return self
+
 
 rag_config = RAGSettings()
+

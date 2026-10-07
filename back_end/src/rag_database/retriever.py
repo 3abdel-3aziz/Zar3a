@@ -227,7 +227,8 @@ class RAGRetriever:
 
             for item in dense_candidates:
                 payload = item.get("payload") or {}
-                text = payload.get("content", "")
+                # NOTE: ingestion pipeline stores text under "content" key
+                text = payload.get("content", "") or payload.get("chunk_text", "")
                 tokens = self.tokenize(text)
                 corpus_tokens.append(tokens)
                 id_order.append(item.get("id"))
@@ -284,9 +285,18 @@ class RAGRetriever:
                 if chunk_id is None:
                     chunk_id = item.get("id")
 
+                # NOTE: ingestion pipeline stores text under "content" key;
+                # fall back to "chunk_text" for any legacy points ingested
+                # before this schema was standardised.
+                chunk_text = (
+                    payload.get("content", "")
+                    or payload.get("chunk_text", "")
+                    or ""
+                )
+
                 result_entry = {
                     "chunk_id": chunk_id,
-                    "content": payload.get("content", ""),
+                    "content": chunk_text,
                     "score": round(rrf_score, 6),
                     "metadata": {
                         "doc_id": payload.get("doc_id"),

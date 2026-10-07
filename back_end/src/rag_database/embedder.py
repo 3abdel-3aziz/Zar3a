@@ -35,7 +35,12 @@ class RAGEmbedder:
             self.device,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
+        # low_cpu_mem_usage=False prevents PyTorch from placing weights on a
+        # "meta" device before copying to the target, which raises:
+        #   NotImplementedError: Cannot copy out of meta tensor; no data!
+        self.model = AutoModel.from_pretrained(
+            self.model_name, low_cpu_mem_usage=False
+        ).to(self.device)
         self.model.eval()
         logger.info("Embedding model loaded successfully.")
 

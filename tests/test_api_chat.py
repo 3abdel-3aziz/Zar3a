@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 import pytest
 
-from src.api.dependencies import get_agent_graph
-from src.api.main import app
+from api.dependencies import get_agent_graph
+from api.main import app
 
 client = TestClient(app)
 

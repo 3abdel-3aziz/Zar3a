@@ -1,7 +1,34 @@
+"""
+semantic_chunker.py
+───────────────────────────────────────────────────────────────────────────────
+Article-aware + recursive-character-fallback chunker for Arabic legal documents.
+
+Strategy (two-pass):
+  Pass 1 – Structural split:
+      Split on recognised article/section headers (المادة, مادة, Article).
+      Every recognised header becomes a separate chunk so article-level
+      diffs and citation work out of the box.
+
+  Pass 2 – Recursive character fallback (NEW):
+      If Pass 1 yields ≤1 chunk (i.e. no structural headers were found, or the
+      entire document ended up as one giant preamble), run a recursive
+      character splitter instead.  This splitter tries paragraph → sentence →
+      word boundaries in sequence and guarantees that every chunk stays inside
+      the configured size window with a configurable overlap.
+
+      This covers three real-world failure modes:
+        a) OCR output that looks like plain paragraphs with no Markdown headers.
+        b) Documents where the TextFormatter missed the header pattern.
+        c) Non-legal documents (wiki scrape, ministry announcements) that have
+           no article structure at all.
+"""
+
+from __future__ import annotations
+
 import logging
 import re
 import unicodedata
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from pydantic import BaseModel, Field
 
@@ -14,10 +41,11 @@ logger = logging.getLogger(__name__)
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+
 class ChunkMetadata(BaseModel):
     """Strongly-typed metadata attached to every chunk."""
 
-    type: str  # 'preamble' | 'article'
+    type: str  # 'preamble' | 'article' | 'section' | 'paragraph' | 'recursive'
     header: Optional[str] = None
     article_number: Optional[Union[int, str]] = None
     word_count: int = 0
@@ -34,52 +62,58 @@ class Chunk(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Regex helpers
 # ---------------------------------------------------------------------------
 
-# Matches Arabic article headers: "### المادة 12", "ماده (٦)", etc.
+# Arabic article headers: "### المادة 12", "مادة (٦)", "المادة الأولى", etc.
 _ARABIC_ARTICLE_NUMBER_RE = re.compile(
     r"(?:الماد[ةه]|ماد[ةه])\s*\(?\s*([0-9\u0660-\u0669]+)\)?",
     re.IGNORECASE,
 )
 
-# Matches English article headers in multiple formats:
-#   "Article 5"  |  "Article (4)"  |  "(Article 1)"  |  "## Article 1 Some title"
+# English article headers
 _ENGLISH_ARTICLE_NUMBER_RE = re.compile(
     r"\(?\s*Article\s*\(?\s*(\d+)\s*\)?",
     re.IGNORECASE,
 )
 
-# Combined convenience alias used by _extract_article_number
-_ARTICLE_NUMBER_RE = re.compile(
-    r"(?:Article|الماد[ةه]|ماد[ةه])\s*\(?\s*([0-9\u0660-\u0669\w]+)\)?",
-    re.IGNORECASE,
-)
-
-
-# Detects Arabic Unicode characters.
+# Arabic Unicode
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+")
+
+# Eastern-Arabic → Western digit translation table
+_EASTERN_TO_WESTERN = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+# Separators used by the recursive character splitter, in priority order.
+# We try each one in sequence until chunks fit within the target window.
+_SPLIT_SEPARATORS: List[str] = [
+    "\n\n",   # paragraph boundary
+    ".\n",    # sentence ending followed by newline
+    "،\n",    # Arabic comma + newline
+    ".\u0020",  # sentence ending + space
+    "،\u0020",  # Arabic comma + space
+    "\n",     # any newline
+    "،",      # Arabic comma alone
+    ".",      # any period
+    " ",      # word boundary (last resort)
+    "",       # character (absolute fallback)
+]
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 
 def _extract_article_number(header: str) -> Optional[Union[int, str]]:
-    """Return the numeric article number from *header*, or ``None``.
-
-    Resolution order:
-    1. Arabic patterns  (e.g. ``مادة (٦)``  or  ``المادة 12``)
-    2. English patterns (e.g. ``Article 5``, ``Article (4)``, ``(Article 1)``)
-    """
-    # -- Arabic first (preserves existing behaviour) -----------------------
+    """Return the numeric article number from *header*, or ``None``."""
     m = _ARABIC_ARTICLE_NUMBER_RE.search(header)
     if m:
         raw = m.group(1)
-        # Convert Eastern-Arabic digits to Western digits
-        eastern = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
         try:
-            return int(raw.translate(eastern))
+            return int(raw.translate(_EASTERN_TO_WESTERN))
         except ValueError:
             return raw
 
-    # -- English next -------------------------------------------------------
     m = _ENGLISH_ARTICLE_NUMBER_RE.search(header)
     if m:
         try:
@@ -90,14 +124,105 @@ def _extract_article_number(header: str) -> Optional[Union[int, str]]:
     return None
 
 
-def _detect_language(header: str) -> str:
-    """Return ``'ar'`` if the header contains Arabic characters, else ``'en'``."""
-    return "ar" if _ARABIC_RE.search(header) else "en"
+def _detect_language(text: str) -> str:
+    """Return ``'ar'`` if the text contains Arabic characters, else ``'en'``."""
+    return "ar" if _ARABIC_RE.search(text) else "en"
 
 
 def _word_count(text: str) -> int:
     """Fast whitespace-based word count."""
     return len(text.split())
+
+
+def _classify_header_type(header: str) -> str:
+    """Classify an article header as 'article' or 'section'."""
+    section_re = re.compile(
+        r"(?:الباب|باب|الفصل|فصل|القسم|قسم|الجزء|جزء)",
+        re.IGNORECASE,
+    )
+    if section_re.search(header):
+        return "section"
+    return "article"
+
+
+# ---------------------------------------------------------------------------
+# Recursive character splitter (no external deps)
+# ---------------------------------------------------------------------------
+
+
+def _recursive_split(
+    text: str,
+    separators: List[str],
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[str]:
+    """
+    Splits *text* into chunks no larger than *chunk_size* characters,
+    with *chunk_overlap* characters of prefix context.
+
+    Tries each separator in *separators* in order.  Once a separator
+    produces pieces that individually fit within *chunk_size*, those pieces
+    are merged greedily until the next merge would exceed *chunk_size*,
+    then a new chunk starts (beginning with the last *chunk_overlap* chars
+    of the preceding chunk as context).
+    """
+    # Base case: already fits
+    if len(text) <= chunk_size:
+        stripped = text.strip()
+        return [stripped] if stripped else []
+
+    # Try separators in priority order
+    for sep in separators:
+        if sep == "":
+            # Absolute character-level fallback
+            pieces = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size - chunk_overlap)]
+            return [p.strip() for p in pieces if p.strip()]
+
+        raw_pieces = text.split(sep)
+        # If the split produced >1 pieces, use this separator
+        if len(raw_pieces) > 1:
+            # Re-attach the separator to all pieces except the last
+            pieces_with_sep: List[str] = []
+            for i, piece in enumerate(raw_pieces):
+                if i < len(raw_pieces) - 1:
+                    pieces_with_sep.append(piece + sep)
+                else:
+                    pieces_with_sep.append(piece)
+
+            # Sub-split any piece that still exceeds chunk_size
+            good_pieces: List[str] = []
+            remaining_seps = separators[separators.index(sep) + 1 :]
+            for piece in pieces_with_sep:
+                if len(piece) > chunk_size and remaining_seps:
+                    good_pieces.extend(_recursive_split(piece, remaining_seps, chunk_size, chunk_overlap))
+                else:
+                    good_pieces.append(piece)
+
+            # Merge small pieces into chunks
+            chunks: List[str] = []
+            current = ""
+            for piece in good_pieces:
+                if not piece.strip():
+                    continue
+                if len(current) + len(piece) <= chunk_size:
+                    current += piece
+                else:
+                    if current.strip():
+                        chunks.append(current.strip())
+                    # Start new chunk with overlap context
+                    if chunk_overlap > 0 and current:
+                        overlap_text = current[-chunk_overlap:]
+                        current = overlap_text + piece
+                    else:
+                        current = piece
+
+            if current.strip():
+                chunks.append(current.strip())
+
+            return [c for c in chunks if c.strip()]
+
+    # Fallback: return as single chunk
+    return [text.strip()] if text.strip() else []
 
 
 # ---------------------------------------------------------------------------
@@ -109,55 +234,50 @@ class SemanticChunker(BaseChunker):
     """
     Article-aware semantic chunker for legal/regulatory Markdown documents.
 
-    Splits the full Markdown text exactly at article headers, so every
-    chunk maps 1-to-1 with one legal article.  This is the ideal input
-    for the Diff Engine because it can detect precise article-level
-    additions, modifications, and deletions.
-
-    Recognised header patterns (configurable via ``header_pattern``):
-        - Arabic:  ``### المادة 5``  or  ``### مادة الأولى``
-        - English: ``### Article 5``
-
-    Any text that appears before the first article header is kept as a
-    preamble chunk (chunk_index=0, type='preamble').
-
-    Patterns are loaded from ``config/document_processor_config.yaml``
-    (``processing_pipeline.semantic_chunker.*``) and compiled at import
-    time.  Pass explicit ``re.Pattern`` objects to override them at
-    runtime (useful in tests).
+    Pass 1: Splits on article/section headers (المادة, مادة, Article).
+    Pass 2: If no structure found, applies recursive character splitting
+            with configurable chunk_size and chunk_overlap to guarantee
+            all documents are chunked even without explicit headers.
     """
 
-    # ------------------------------------------------------------------
-    # Default patterns – loaded from config at module level so the YAML
-    # is the single source of truth.
-    # ------------------------------------------------------------------
+    # Default article header pattern
     _DEFAULT_ARTICLE_PATTERN: re.Pattern = re.compile(
         r"(?m)"
         r"^((?:#{1,6}\s*|\*\*)?[\(\（]?\s*(?!Page\s+\d)(?:ب?(?:المادة|مادة)|Article)\s*[\(\（]?\s*(?:\d+|[٠-٩]+|[أ-ي]+)?\s*[\)\）]?\s*(?:\((?:المادة|مادة)\s+[أ-ي]+\))?\s*:?(?:\*\*)?\s*:?\s*$"
         r"|\*\*\s*(?:ب?(?:المادة|مادة)|Article)\s*[\(\（]\s*(?:\d+|[٠-٩]+|[أ-ي]+)\s*[\)\）]\s*:?\s*\*\*)",
         re.IGNORECASE,
     )
+
     _DEFAULT_PAGE_SEP_PATTERN: re.Pattern = re.compile(
         r"(?m)^\s*(?:#{1,6}\s*)?---\s*\n+\s*(?:#{1,6}\s*)?Page\s+\d*\s*\n+\d*\s*\n*"
     )
-
-    # ------------------------------------------------------------------
 
     def __init__(
         self,
         header_pattern: Optional[re.Pattern] = None,
         page_sep_pattern: Optional[re.Pattern] = None,
+        *,
+        # Recursive fallback parameters
+        fallback_chunk_size: int = 700,
+        fallback_chunk_overlap: int = 120,
+        fallback_min_chars: int = 80,
     ) -> None:
         """
         Args:
-            header_pattern (re.Pattern | None): Override the default article-header
-                regex.  Must use exactly one capture group so that ``re.split()``
-                keeps the delimiter in the resulting list.
-            page_sep_pattern (re.Pattern | None): Override the default page-separator
-                cleanup regex.
+            header_pattern:       Override the default article-header regex.
+            page_sep_pattern:     Override the default page-separator cleanup regex.
+            fallback_chunk_size:  Target character length for recursive fallback chunks.
+                                  Chosen to fit ~100-120 Arabic words (good for
+                                  multilingual-e5-large's 512-token limit).
+            fallback_chunk_overlap: Characters of context carried over between
+                                  consecutive fallback chunks.
+            fallback_min_chars:   Discard fallback chunks shorter than this.
         """
         self._pattern = header_pattern or self._DEFAULT_ARTICLE_PATTERN
         self._page_sep_pattern = page_sep_pattern or self._DEFAULT_PAGE_SEP_PATTERN
+        self._fallback_chunk_size = fallback_chunk_size
+        self._fallback_chunk_overlap = fallback_chunk_overlap
+        self._fallback_min_chars = fallback_min_chars
 
     # ------------------------------------------------------------------
     # BaseChunker contract
@@ -165,44 +285,61 @@ class SemanticChunker(BaseChunker):
 
     def create_chunks(self, full_text: str, doc_id: str) -> List[dict]:
         """
-        Split *full_text* on article headers.
-
-        Args:
-            full_text (str): The complete Markdown string from the extractor.
-            doc_id (int):    Parent document identifier (must be a positive int).
+        Split *full_text* on article headers (Pass 1).
+        Fall back to recursive character splitting (Pass 2) when no
+        structural headers are detected.
 
         Returns:
-            List[Chunk]: Pydantic ``Chunk`` objects with enriched metadata.
-
-        Raises:
-            ValueError: If *full_text* is not a non-empty string, or if
-                        *doc_id* is not a positive integer.
+            List[dict]: Serialised Chunk model dicts.
         """
-        # ------------------------------------------------------------------
-        # 1. Input validation
-        # ------------------------------------------------------------------
         if not isinstance(full_text, str) or not full_text.strip():
             raise ValueError(
-                "full_text must be a non-empty string, "
-                f"got {type(full_text).__name__!r}: {full_text!r}"
+                f"full_text must be a non-empty string, got {type(full_text).__name__!r}: {full_text!r}"
             )
         if not isinstance(doc_id, (int, str)):
             raise ValueError(
                 f"doc_id must be an integer or string, got {type(doc_id).__name__!r}: {doc_id!r}"
             )
 
-        logger.debug("SemanticChunker: Splitting doc_id=%s on article headers…", doc_id)
-
-        # ------------------------------------------------------------------
-        # 2. Page-separator cleanup (hardened regex from config)
-        # ------------------------------------------------------------------
+        # 1. Page-separator cleanup
         full_text = self._page_sep_pattern.sub("", full_text)
 
-        # ------------------------------------------------------------------
-        # 3. Split on article headers
-        # re.split with a capturing group keeps the delimiters in the list:
-        # [text_before_first_header, header, body, header, body, …]
-        # ------------------------------------------------------------------
+        # 2. Pass 1 — structural header split
+        chunks = self._structural_split(full_text, doc_id)
+
+        # 3. Pass 2 — recursive fallback when no article structure found
+        #    Trigger when: only one chunk produced (the whole doc became preamble),
+        #    OR that single chunk is extremely large (> 2× fallback window)
+        if len(chunks) <= 1:
+            sole_chunk = chunks[0] if chunks else None
+            sole_is_huge = (
+                sole_chunk is not None
+                and len(sole_chunk["content"]) > self._fallback_chunk_size * 2
+            )
+            if sole_chunk is None or sole_is_huge:
+                logger.info(
+                    "SemanticChunker: doc_id=%s – structural split yielded %d chunk(s). "
+                    "Activating recursive character fallback (chunk_size=%d, overlap=%d).",
+                    doc_id,
+                    len(chunks),
+                    self._fallback_chunk_size,
+                    self._fallback_chunk_overlap,
+                )
+                chunks = self._recursive_fallback_split(full_text, doc_id)
+
+        logger.info(
+            "SemanticChunker: doc_id=%s – %d total chunks produced.",
+            doc_id,
+            len(chunks),
+        )
+        return chunks
+
+    # ------------------------------------------------------------------
+    # Internal: Pass 1 — structural header split
+    # ------------------------------------------------------------------
+
+    def _structural_split(self, full_text: str, doc_id: str) -> List[dict]:
+        """Split on article/section headers using the compiled regex."""
         parts = self._pattern.split(full_text)
 
         chunks: List[Chunk] = []
@@ -210,9 +347,7 @@ class SemanticChunker(BaseChunker):
         article_count = 0
         preamble_count = 0
 
-        # ------------------------------------------------------------------
-        # 4. Preamble – everything before the first header
-        # ------------------------------------------------------------------
+        # Preamble — text before the first header
         preamble = parts[0].strip()
         if preamble:
             chunks.append(
@@ -225,28 +360,23 @@ class SemanticChunker(BaseChunker):
                         header=None,
                         article_number=None,
                         word_count=_word_count(preamble),
-                        language="en",
+                        language=_detect_language(preamble),
                     ),
                 )
             )
             idx += 1
             preamble_count += 1
 
-        # ------------------------------------------------------------------
-        # 5. Article chunks – header/body pairs
-        # ------------------------------------------------------------------
+        # Article / section chunks
         remaining = parts[1:]
         it = iter(range(len(remaining)))
         for i in it:
             header = remaining[i]
-
-            # Guard against malformed splits (unexpected list structure)
             try:
                 j = next(it)
             except StopIteration:
                 logger.warning(
-                    "SemanticChunker: doc_id=%s – header at position %d has no "
-                    "corresponding body; skipping: %r",
+                    "SemanticChunker: doc_id=%s – header at position %d has no body; skipping: %r",
                     doc_id,
                     i,
                     header[:80],
@@ -255,36 +385,20 @@ class SemanticChunker(BaseChunker):
 
             body_raw = remaining[j]
             if not isinstance(header, str) or not isinstance(body_raw, str):
-                logger.warning(
-                    "SemanticChunker: doc_id=%s – unexpected type at positions "
-                    "(%d, %d): header=%r body=%r; skipping.",
-                    doc_id,
-                    i,
-                    j,
-                    type(header),
-                    type(body_raw),
-                )
                 continue
 
             header = header.strip()
             body = body_raw.strip()
-            if not body:
-                logger.warning(
-                    "SemanticChunker: doc_id=%s – article chunk at index %d has an empty body "
-                    "(header: %r). This may indicate a PDF extraction issue.",
-                    doc_id,
-                    idx,
-                    header,
-                )
             content = f"{header}\n\n{body}" if body else header
 
+            chunk_type = _classify_header_type(header)
             chunks.append(
                 Chunk(
                     doc_id=doc_id,
                     chunk_index=idx,
                     content=content,
                     metadata=ChunkMetadata(
-                        type="article",
+                        type=chunk_type,
                         header=header,
                         article_number=_extract_article_number(header),
                         word_count=_word_count(content),
@@ -295,13 +409,63 @@ class SemanticChunker(BaseChunker):
             idx += 1
             article_count += 1
 
-        logger.info(
-            "SemanticChunker: doc_id=%s – %d chunks created "
-            "(%d articles, %d preamble).",
+        logger.debug(
+            "SemanticChunker._structural_split: doc_id=%s – %d chunks "
+            "(%d articles/sections, %d preamble).",
             doc_id,
             len(chunks),
             article_count,
             preamble_count,
         )
-        
         return [c.model_dump() for c in chunks]
+
+    # ------------------------------------------------------------------
+    # Internal: Pass 2 — recursive character fallback
+    # ------------------------------------------------------------------
+
+    def _recursive_fallback_split(self, full_text: str, doc_id: str) -> List[dict]:
+        """
+        Splits *full_text* recursively using paragraph → sentence → word
+        boundaries until all chunks fit within *fallback_chunk_size*.
+        """
+        raw_chunks = _recursive_split(
+            full_text,
+            _SPLIT_SEPARATORS,
+            self._fallback_chunk_size,
+            self._fallback_chunk_overlap,
+        )
+
+        chunks: List[dict] = []
+        for idx, content in enumerate(raw_chunks):
+            content = content.strip()
+            if len(content) < self._fallback_min_chars:
+                # Merge tiny tail fragments into the previous chunk
+                if chunks:
+                    chunks[-1]["content"] += " " + content
+                    chunks[-1]["metadata"]["word_count"] = _word_count(chunks[-1]["content"])
+                continue
+
+            chunk = Chunk(
+                doc_id=doc_id,
+                chunk_index=idx,
+                content=content,
+                metadata=ChunkMetadata(
+                    type="recursive",
+                    header=None,
+                    article_number=None,
+                    word_count=_word_count(content),
+                    language=_detect_language(content),
+                ),
+            )
+            chunks.append(chunk.model_dump())
+
+        # Re-index after any merges
+        for new_idx, ch in enumerate(chunks):
+            ch["chunk_index"] = new_idx
+
+        logger.debug(
+            "SemanticChunker._recursive_fallback_split: doc_id=%s – %d chunks.",
+            doc_id,
+            len(chunks),
+        )
+        return chunks

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional, Sequence, cast
 
 from src.agent.config import (
@@ -172,6 +173,110 @@ def set_router_chain(chain: Optional[Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Keyword-Based Fallback Router (no LLM required)
+# ---------------------------------------------------------------------------
+
+# Legal, regulatory, policy, council, and climate change knowledge keywords (Arabic + English)
+_KNOWLEDGE_KEYWORDS_AR = {
+    # Legal & Regulatory
+    "قانون", "تشريع", "لائحة", "مرسوم", "وزار", "بيئ", "حظر", "ترخيص",
+    "اشتراط", "بلدي", "نظام", "قرار", "وثيق", "مستند", "حكوم", "عقوب",
+    "مخالف", "كود", "مواصف", "معيار", "معايير", "147", "4 لسنة", "مادة",
+    "موارد مائية", "مائي", "ري وصرف",
+    # Climate Strategy, Councils & Governance
+    "مجلس", "استراتيج", "أهداف", "هدف", "خطة", "خطط", "سياس", "وطني",
+    "قومي", "رؤية", "تغير المناخ", "المناخية", "تغيرات", "احتباس",
+    "انبعاث", "انبعاثات", "تكيف", "تخفيف", "كربون", "بصمة", "تنمية مستدامة",
+    # Treaties & Conventions
+    "اتفاق", "بروتوكول", "معاهدة", "كيوتو", "باريس", "مؤتمر", "cop",
+    "التزام", "التزامات", "تقرير", "بيان",
+}
+_KNOWLEDGE_KEYWORDS_EN = {
+    "law", "regulat", "decree", "permit", "legal", "act", "ordinance",
+    "ministry", "municipal", "bylaw", "ban", "prohibited", "guideline",
+    "requirement", "compliance", "environmental", "legislation", "code",
+    "standard", "penalty", "violation", "article", "decree no",
+    "strategy", "council", "objective", "target", "goal", "plan", "policy",
+    "national", "vision", "climate change", "emission", "mitigation",
+    "adaptation", "sustainable", "governance", "treaty", "protocol",
+    "kyoto", "paris", "unfccc", "cop", "convention", "report",
+}
+
+# Urban forestry & specific tree recommendation keywords (Arabic + English)
+_TREE_REC_KEYWORDS_AR = {
+    "شجر", "أشجار", "نبات", "شتل", "شتلات", "تشجير", "تخضير", "غرس",
+    "أنواع الأشجار", "أصناف الأشجار", "ظل", "تبريد", "جزيرة حرارية", "سدر", "نخل", "أكاسيا",
+    "فيكس", "نيم", "بوانسيانا", "كاسيا", "يوكالبتوس", "كونوكاربس", "كافور",
+    "توت", "جهنمية", "ملوحة التربة", "تحمل الجفاف", "شارع ضيق", "تربة زراعية", "شبكة ري",
+    "ري بالتنقيط", "حديقة", "رصيف", "رشح", "ترشيح",
+}
+_TREE_REC_KEYWORDS_EN = {
+    "tree", "plant", "species", "shade", "cool", "heat island", "urban heat",
+    "greenery", "garden", "narrow street", "sidewalk", "canopy",
+    "leaf", "leaves", "trunk", "root", "roots", "water need", "drought",
+    "salinity", "sidr", "neem", "acacia", "ficus", "poinciana",
+    "recommend", "planting",
+}
+
+# Explicit tree recommendation intent keywords (Arabic + English)
+_TREE_INTENT_AR = {"شجر", "أشجار", "رشح", "ترشيح", "غرس", "شتل", "أصناف", "أنواع"}
+_TREE_INTENT_EN = {"tree", "trees", "recommend", "species", "planting"}
+
+
+def _contains_keyword(text: str, keywords: set[str]) -> bool:
+    """Checks whether text contains any keyword, using token and prefix boundaries for Arabic/English."""
+    q = text.lower()
+    tokens = set(re.findall(r"[\w]+", q))
+    for kw in keywords:
+        if " " in kw:
+            if kw in q:
+                return True
+        else:
+            if kw in tokens:
+                return True
+            for t in tokens:
+                if t.startswith(("ال", "وال", "بال", "كال", "فال", "لل")):
+                    stripped = re.sub(r"^(ال|وال|بال|كال|فال|لل)", "", t)
+                    if stripped == kw or (len(kw) >= 4 and stripped.startswith(kw)):
+                        return True
+                elif len(kw) >= 4 and t.startswith(kw):
+                    return True
+    return False
+
+
+def _keyword_route(query: str) -> List[str]:
+    """
+    Classifies a query into routing destinations using comprehensive keyword matching.
+
+    Returns:
+        ["knowledge"] for legal, regulatory, council, strategy, and environmental policy queries.
+        ["climate_recommendation"] for specific tree recommendation and planting queries.
+        ["knowledge", "climate_recommendation"] for compound inquiries or general topics.
+    """
+    hits_knowledge = _contains_keyword(query, _KNOWLEDGE_KEYWORDS_AR) or \
+                     _contains_keyword(query, _KNOWLEDGE_KEYWORDS_EN)
+    hits_tree_rec = _contains_keyword(query, _TREE_REC_KEYWORDS_AR) or \
+                    _contains_keyword(query, _TREE_REC_KEYWORDS_EN)
+    has_tree_intent = _contains_keyword(query, _TREE_INTENT_AR) or \
+                      _contains_keyword(query, _TREE_INTENT_EN)
+
+    # Pure legal / regulatory / council / strategy queries without explicit tree recommendation intent
+    if hits_knowledge and not has_tree_intent:
+        return ["knowledge"]
+
+    # Compound query: asks about tree species AND legal/regulatory/policy constraints
+    if hits_knowledge and hits_tree_rec and has_tree_intent:
+        return list(FALLBACK_ROUTES)
+
+    # Specific tree recommendation / species / planting query
+    if hits_tree_rec and has_tree_intent:
+        return ["climate_recommendation"]
+
+    # Default to knowledge retrieval for general or unclassified questions
+    return ["knowledge"]
+
+
+# ---------------------------------------------------------------------------
 # Supervisor Router Node Function
 # ---------------------------------------------------------------------------
 
@@ -242,6 +347,15 @@ def route_query(
 
     logger.info("Router evaluating query (%d chars): '%s...'", len(latest_query_text), latest_query_text[:100])
 
+    # --- Fast path: use keyword-based routing when no external LLM is available ---
+    # Avoids blocking on an LLM API call when OPENAI_API_KEY is not set
+    # and no explicit chain override has been provided.
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if llm_chain is None and not openai_key:
+        keyword_routes = _keyword_route(latest_query_text)
+        logger.info("Supervisor router (keyword mode) decision: %s", keyword_routes)
+        return {"routes": keyword_routes}
+
     # Assemble prompt messages: System prompt + conversation history
     prompt_messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
@@ -260,20 +374,19 @@ def route_query(
 
         if not chosen_routes:
             logger.warning(
-                "Router LLM produced no valid routes (raw output: %s). Defaulting to fallback routes: %s",
+                "Router LLM produced no valid routes (raw output: %s). Using keyword fallback.",
                 raw_routes,
-                FALLBACK_ROUTES,
             )
-            chosen_routes = list(FALLBACK_ROUTES)
+            chosen_routes = _keyword_route(latest_query_text)
 
-        logger.info("Supervisor router decision: %s", chosen_routes)
+        logger.info("Supervisor router (LLM mode) decision: %s", chosen_routes)
         return {"routes": chosen_routes}
 
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "Supervisor router LLM invocation failed: %s. Defaulting to fallback routes: %s",
+        logger.warning(
+            "Supervisor router LLM invocation failed: %s. Falling back to keyword routing.",
             exc,
-            FALLBACK_ROUTES,
-            exc_info=True,
         )
-        return {"routes": list(FALLBACK_ROUTES)}
+        keyword_routes = _keyword_route(latest_query_text)
+        logger.info("Supervisor router (keyword fallback) decision: %s", keyword_routes)
+        return {"routes": keyword_routes}

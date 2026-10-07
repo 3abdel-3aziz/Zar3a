@@ -1,0 +1,137 @@
+services:
+  # ── Backend (FastAPI + AI/ML) ────────────────────────────────────────────────
+  backend:
+    build:
+      # Context is the repo root so the Dockerfile can COPY both
+      # pyproject.toml/uv.lock (root) and back_end/src/ (sub-directory).
+      context: .
+      dockerfile: back_end/Dockerfile
+    container_name: zar3a_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - PYTHONPATH=/app/src
+      # When running in Docker, Qdrant data lives in the named volume below —
+      # unset the local-path override so the client uses the Qdrant service.
+      - QDRANT_LOCAL_PATH=
+    volumes:
+      - qdrant_data:/app/qdrant_storage
+    depends_on:
+      - qdrant
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Frontend (Nginx static) ──────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: zar3a_frontend
+    ports:
+      - "8888:80"
+    depends_on:
+      - backend
+    environment:
+      - BACKEND_URL=http://backend:8000
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+
+  # ── Qdrant vector store ──────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: zar3a_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: zar3a_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+
+  # ── Loki (log aggregation) ───────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: zar3a_loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+
+  # ── Promtail (log shipper: Docker → Loki) ────────────────────────────────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: zar3a_promtail
+    volumes:
+      - ./observability/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      # Mount the Docker socket so Promtail can discover container logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  # ── Grafana (dashboards) ─────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.2.0
+    platform: linux/amd64
+    container_name: zar3a_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - zar3a_net
+    restart: unless-stopped
+
+# ── Named volumes ────────────────────────────────────────────────────────────
+volumes:
+  qdrant_data:
+  prometheus_data:
+  grafana_data:
+
+# ── Overlay network (all services share this bridge) ────────────────────────
+networks:
+  zar3a_net:
+    driver: bridge

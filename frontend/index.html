@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Zurra — AI-driven urban climate and agriculture decision support platform for Egypt. Interactive ML climate prediction with Leaflet map." />
+  <meta name="theme-color" content="#0D1A13" />
+  <title>Zurra | زرعة — Urban Climate Decision Platform</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <!-- Tailwind CSS via CDN (v3) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'forest':  '#2E5A44',
+            'earth':   '#8D5B4C',
+            'sky':     '#3B82F6',
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- Custom CSS (nature-inspired design system) -->
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+
+<body>
+  <!-- ══════════════════════════════════════════════════════
+       TOP NAVIGATION BAR
+  ══════════════════════════════════════════════════════ -->
+  <header id="topbar" role="banner">
+    <div class="brand">
+      <img src="assets/I am Groot.png"
+           alt="Zurra Logo"
+           class="logo-img"
+           id="topbar-logo" />
+      <div>
+        <div class="brand-name">Zurra &nbsp;<span style="font-size:0.9rem;">زرعة</span></div>
+        <div class="brand-sub">Urban Climate &amp; Agriculture Intelligence</div>
+      </div>
+    </div>
+
+    <nav aria-label="Primary navigation">
+      <button class="nav-btn active" data-scroll="workspace" id="nav-prediction">🌡️ Climate Prediction</button>
+      <button class="nav-btn"        data-scroll="rec-box"   id="nav-recs">🌳 Tree Recs &amp; Diff</button>
+      <button class="nav-btn"        data-scroll="chat-box"  id="nav-chat">🤖 Zurra Assistant</button>
+      <button class="nav-btn"        data-view="info"        id="nav-info">📋 Schema</button>
+      <button class="nav-btn"        data-view="history"     id="nav-history">📊 History</button>
+    </nav>
+
+    <div class="topbar-right">
+      <div class="topbar-status">
+        <span class="status-dot" id="api-dot" title="API status"></span>
+        <span id="api-status-label">API Online</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════
+       MAIN APP SHELL
+  ══════════════════════════════════════════════════════ -->
+  <main id="app" role="main">
+
+    <!-- ── KPI METRIC RIBBON ──────────────────────────── -->
+    <section id="kpi-ribbon" aria-label="Key Performance Indicators">
+
+      <div class="kpi-card" title="Predicted temperature for last run">
+        <div class="kpi-icon green">🌡️</div>
+        <div>
+          <div class="kpi-label">Last Prediction</div>
+          <div class="kpi-value" id="kpi-last-temp">—</div>
+          <div class="kpi-change text-muted">Mean temperature °C</div>
+        </div>
+      </div>
+
+      <div class="kpi-card" title="Total predictions made this session">
+        <div class="kpi-icon blue">📈</div>
+        <div>
+          <div class="kpi-label">Total Runs</div>
+          <div class="kpi-value" id="kpi-total-runs">0</div>
+          <div class="kpi-change text-muted">Session inferences</div>
+        </div>
+      </div>
+
+      <div class="kpi-card" title="NDVI mean from the last prediction">
+        <div class="kpi-icon green">🌿</div>
+        <div>
+          <div class="kpi-label">NDVI Mean</div>
+          <div class="kpi-value" id="kpi-ndvi">—</div>
+          <div class="kpi-change text-muted">Vegetation index</div>
+        </div>
+      </div>
+
+      <div class="kpi-card" title="Greenery coverage area (last run)">
+        <div class="kpi-icon brown">🌳</div>
+        <div>
+          <div class="kpi-label">Greenery Area</div>
+          <div class="kpi-value" id="kpi-green-area">—</div>
+          <div class="kpi-change text-muted">Square meters</div>
+        </div>
+      </div>
+
+      <div class="kpi-card" title="Active grid cell location">
+        <div class="kpi-icon amber">📍</div>
+        <div>
+          <div class="kpi-label">Active Cell</div>
+          <div class="kpi-value" id="kpi-active-cell" style="font-size:0.85rem;">None</div>
+          <div class="kpi-change text-muted">Lat / Lon</div>
+        </div>
+      </div>
+
+    </section>
+    <!-- end kpi-ribbon -->
+
+    <!-- ── TWO-COLUMN WORKSPACE ───────────────────────── -->
+    <div id="workspace">
+
+      <!-- ── MAP PANEL (LEFT) ───────────────────────── -->
+      <section id="map-panel" aria-label="Interactive Egypt Map">
+        <div id="map-header">
+          <h2>
+            🗺️ Egypt Grid Map
+            <span style="color:var(--text-muted);font-size:0.72rem;font-weight:400;">
+              — Click a location to load coordinates
+            </span>
+          </h2>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button id="grid-toggle-btn"
+                    style="padding:4px 10px;font-size:0.72rem;border:1px solid var(--bg-border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;"
+                    title="Toggle grid overlay">⊞ Grid</button>
+            <button id="reset-view-btn"
+                    style="padding:4px 10px;font-size:0.72rem;border:1px solid var(--bg-border);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;"
+                    title="Reset map to Egypt">⌖ Reset</button>
+          </div>
+        </div>
+
+        <div id="map-container">
+          <!-- Leaflet map target -->
+          <div id="leaflet-map"></div>
+
+          <!-- Floating coordinate display -->
+          <div id="coord-overlay">
+            <span>📍</span>
+            <span id="coord-text">Click map to select</span>
+          </div>
+
+          <!-- Click hint banner -->
+          <div id="map-hint">🖱️ Click anywhere on Egypt to extract geographic coordinates</div>
+        </div>
+      </section>
+      <!-- end map-panel -->
+
+      <!-- ── SIDE PANEL (RIGHT) ─────────────────────── -->
+      <aside id="side-panel" aria-label="Prediction Control Panel">
+
+        <!-- Tab strip -->
+        <div id="panel-tabs" role="tablist">
+          <button class="tab-btn active" role="tab" data-tab="prediction" id="tab-prediction" aria-selected="true">
+            🌡️ ML Prediction
+          </button>
+          <button class="tab-btn" role="tab" data-tab="info" id="tab-info" aria-selected="false">
+            📋 Field Info
+          </button>
+          <button class="tab-btn" role="tab" data-tab="history" id="tab-history" aria-selected="false">
+            📊 History
+          </button>
+        </div>
+
+        <div id="panel-content">
+
+          <!-- ╔══════════════════════════════════════════
+               TAB 1 — ML PREDICTION FORM
+          ══════════════════════════════════════════╗ -->
+          <div class="panel-view active" id="view-prediction" role="tabpanel">
+
+            <!-- Location badge shows selected coords -->
+            <div id="location-badge">
+              <span class="pin-icon">📍</span>
+              <div id="badge-content">
+                <div class="no-sel" id="badge-no-sel">No location selected — click the map</div>
+                <div class="coords-text" id="badge-coords" style="display:none;"></div>
+              </div>
+            </div>
+
+            <!-- ── Prediction form ───────────────────── -->
+            <form id="prediction-form" novalidate>
+
+              <!-- Geographic coordinates (auto-filled by map click) -->
+              <div class="section-label">📍 Geographic Coordinates</div>
+              <div class="form-grid">
+                <div class="form-field">
+                  <label for="inp-lat">Latitude (lat) *</label>
+                  <input type="number" id="inp-lat" name="lat"
+                         step="0.0001" min="20" max="35"
+                         placeholder="30.0444"
+                         class="coord-field"
+                         required
+                         title="Latitude — auto-filled by clicking the map" />
+                  <span class="hint">Egypt: 22° – 31.8° N</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-lon">Longitude (lon) *</label>
+                  <input type="number" id="inp-lon" name="lon"
+                         step="0.0001" min="24" max="38"
+                         placeholder="31.2357"
+                         class="coord-field"
+                         required
+                         title="Longitude — auto-filled by clicking the map" />
+                  <span class="hint">Egypt: 24.7° – 37° E</span>
+                </div>
+              </div>
+
+              <!-- Vegetation features -->
+              <div class="section-label">🌿 Vegetation Features</div>
+              <div class="form-grid">
+                <div class="form-field">
+                  <label for="inp-greenery-area">Greenery Area (m²)</label>
+                  <input type="number" id="inp-greenery-area" name="greenery_area"
+                         step="100" min="0" value="5000"
+                         placeholder="5000.0" />
+                  <span class="hint">Parks, gardens (m²)</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-greenery-density">Greenery Density</label>
+                  <input type="number" id="inp-greenery-density" name="greenery_density"
+                         step="0.01" min="0" max="1" value="0.20"
+                         placeholder="0.20" />
+                  <span class="hint">0.0 – 1.0 ratio</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-ndvi">NDVI Mean</label>
+                  <input type="number" id="inp-ndvi" name="ndvi_mean"
+                         step="0.01" min="-1" max="1" value="0.18"
+                         placeholder="0.18" />
+                  <span class="hint">−1.0 – 1.0</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-bare-ground">Bare Ground Density</label>
+                  <input type="number" id="inp-bare-ground" name="bare_ground_density"
+                         step="0.01" min="0" max="1" value="0.20"
+                         placeholder="0.20" />
+                  <span class="hint">Desert/sand ratio</span>
+                </div>
+              </div>
+
+              <!-- Built environment -->
+              <div class="section-label">🏗️ Built Environment</div>
+              <div class="form-grid">
+                <div class="form-field">
+                  <label for="inp-building-area">Building Area (m²)</label>
+                  <input type="number" id="inp-building-area" name="building_area"
+                         step="500" min="0" value="25000"
+                         placeholder="25000.0" />
+                </div>
+                <div class="form-field">
+                  <label for="inp-building-density">Building Density</label>
+                  <input type="number" id="inp-building-density" name="building_density"
+                         step="0.01" min="0" max="1" value="0.40"
+                         placeholder="0.40" />
+                  <span class="hint">0.0 – 1.0 ratio</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-avg-levels">Avg Building Levels</label>
+                  <input type="number" id="inp-avg-levels" name="avg_building_levels"
+                         step="0.5" min="1" max="100" value="4"
+                         placeholder="4.0" />
+                  <span class="hint">Average storeys</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-road-density">Road Density</label>
+                  <input type="number" id="inp-road-density" name="road_density"
+                         step="0.005" min="0" value="0.05"
+                         placeholder="0.05" />
+                  <span class="hint">Transport proxy</span>
+                </div>
+              </div>
+
+              <!-- Environment / context -->
+              <div class="section-label">💧 Environment & Context</div>
+              <div class="form-grid">
+                <div class="form-field">
+                  <label for="inp-distance-water">Distance to Water (m)</label>
+                  <input type="number" id="inp-distance-water" name="distance_to_water"
+                         step="50" min="0" value="1200"
+                         placeholder="1200.0" />
+                  <span class="hint">Nearest water body</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-poi-density">POI Density</label>
+                  <input type="number" id="inp-poi-density" name="poi_density"
+                         step="0.001" min="0" value="0.005"
+                         placeholder="0.005" />
+                  <span class="hint">Points of interest</span>
+                </div>
+                <div class="form-field">
+                  <label for="inp-elevation">Elevation (m a.s.l.)</label>
+                  <input type="number" id="inp-elevation" name="elevation"
+                         step="1" min="-50" max="3000" value="65"
+                         placeholder="65.0" />
+                </div>
+                <div class="form-field">
+                  <label for="inp-night-lights">Nighttime Lights</label>
+                  <input type="number" id="inp-night-lights" name="nighttime_lights_intensity"
+                         step="0.5" min="0" value="22.5"
+                         placeholder="22.5" />
+                  <span class="hint">Satellite light proxy</span>
+                </div>
+              </div>
+
+              <!-- API endpoint config -->
+              <div class="section-label">⚙️ API Endpoint</div>
+              <div class="form-grid">
+                <div class="form-field full">
+                  <label for="inp-api-url">Backend URL</label>
+                  <input type="text" id="inp-api-url" name="_api_url"
+                         value="http://localhost:8000/api/v1/climate/predictions"
+                         placeholder="http://localhost:8000/api/v1/climate/predictions"
+                         style="font-size:0.7rem;" />
+                </div>
+              </div>
+
+              <!-- Submit -->
+              <button type="submit" id="predict-btn" aria-label="Run ML Climate Prediction">
+                <div class="spinner" id="btn-spinner"></div>
+                <span class="btn-text">🔬 Run Climate Prediction</span>
+              </button>
+            </form>
+
+            <!-- ── Prediction Result ───────────────── -->
+            <div id="result-panel" aria-live="polite" aria-label="Prediction result">
+              <div class="result-card">
+                <div class="result-header">
+                  <span class="res-title">🌡️ Microclimate Prediction Result</span>
+                  <span id="result-ts" style="font-size:0.64rem;color:var(--text-muted);font-family:'JetBrains Mono',monospace;"></span>
+                </div>
+                <div class="result-body">
+                  <!-- Temperature hero display -->
+                  <div class="temp-display">
+                    <div>
+                      <span class="temp-value" id="result-temp">—</span>
+                      <span class="temp-unit">°C</span>
+                    </div>
+                    <div class="temp-label">Predicted Mean Surface Temperature</div>
+                  </div>
+
+                  <!-- Heat bar gauge -->
+                  <div class="heat-bar-wrap">
+                    <div class="heat-bar-label">
+                      <span>20°C Mild</span>
+                      <span>35°C Warm</span>
+                      <span>45°C Hot</span>
+                    </div>
+                    <div class="heat-bar-track">
+                      <div class="heat-bar-needle" id="heat-needle" style="left:50%;"></div>
+                    </div>
+                  </div>
+
+                  <!-- Metadata rows -->
+                  <div class="result-meta" style="margin-top:12px;">
+                    <div class="meta-row">
+                      <span class="meta-key">Status</span>
+                      <span class="meta-val" id="res-status">—</span>
+                    </div>
+                    <div class="meta-row">
+                      <span class="meta-key">Target Variable</span>
+                      <span class="meta-val" id="res-target">—</span>
+                    </div>
+                    <div class="meta-row">
+                      <span class="meta-key">Cooling Potential</span>
+                      <span class="meta-val" id="res-cooling">—</span>
+                    </div>
+                    <div class="meta-row">
+                      <span class="meta-key">Coordinates</span>
+                      <span class="meta-val" id="res-coords">—</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- end result-panel -->
+
+          </div>
+          <!-- end view-prediction -->
+
+
+          <!-- ╔══════════════════════════════════════════
+               TAB 2 — FIELD INFO / SCHEMA REFERENCE
+          ══════════════════════════════════════════╗ -->
+          <div class="panel-view" id="view-info" role="tabpanel">
+
+            <div class="info-block">
+              <h3>📡 ClimatePredictionInput — Backend Schema</h3>
+              <p>The ML model accepts 14 urban morphology features. Geographic coordinates are auto-extracted from the map click. All other fields have sensible defaults tuned for Egyptian urban environments.</p>
+            </div>
+
+            <div class="info-block">
+              <h3>🌡️ Output Fields (ClimatePredictionResponse)</h3>
+              <table class="field-table">
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>predicted_mean_temp_c</td><td>Local surface temperature in °C</td></tr>
+                  <tr><td>target_variable</td><td>Predicted variable name (mean_temperature)</td></tr>
+                  <tr><td>cooling_potential_c</td><td>Estimated cooling under max canopy (if available)</td></tr>
+                  <tr><td>status</td><td>success / error</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="info-block">
+              <h3>📥 Input Feature Reference</h3>
+              <table class="field-table">
+                <thead>
+                  <tr><th>Field</th><th>Unit / Range</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>lat</td><td>22–31.8 °N</td><td>Latitude in Egypt</td></tr>
+                  <tr><td>lon</td><td>24.7–37 °E</td><td>Longitude in Egypt</td></tr>
+                  <tr><td>greenery_area</td><td>m²</td><td>Total vegetation surface area</td></tr>
+                  <tr><td>greenery_density</td><td>0–1</td><td>Greenery / total area ratio</td></tr>
+                  <tr><td>building_area</td><td>m²</td><td>Building footprint area</td></tr>
+                  <tr><td>building_density</td><td>0–1</td><td>Building / total area ratio</td></tr>
+                  <tr><td>avg_building_levels</td><td>1–100</td><td>Average building height in floors</td></tr>
+                  <tr><td>road_density</td><td>0–1</td><td>Paved road surface ratio</td></tr>
+                  <tr><td>distance_to_water</td><td>meters</td><td>Distance to nearest water body</td></tr>
+                  <tr><td>poi_density</td><td>/unit area</td><td>Points-of-interest density</td></tr>
+                  <tr><td>bare_ground_density</td><td>0–1</td><td>Desert/bare ground proportion</td></tr>
+                  <tr><td>ndvi_mean</td><td>−1 to 1</td><td>Vegetation index (NDVI)</td></tr>
+                  <tr><td>elevation</td><td>meters</td><td>Altitude above sea level</td></tr>
+                  <tr><td>nighttime_lights_intensity</td><td>0–∞</td><td>Satellite nocturnal light proxy</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="info-block">
+              <h3>🔗 API Endpoint</h3>
+              <p><code style="color:var(--blue-light);font-size:0.8rem;">POST /api/v1/climate/predictions</code></p>
+              <p style="margin-top:6px;">CORS-enabled FastAPI backend. Accepts JSON body matching the schema above and returns a <code style="color:var(--green-light);">ClimatePredictionResponse</code>.</p>
+            </div>
+
+          </div>
+          <!-- end view-info -->
+
+
+          <!-- ╔══════════════════════════════════════════
+               TAB 3 — HISTORY
+          ══════════════════════════════════════════╗ -->
+          <div class="panel-view" id="view-history" role="tabpanel">
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-size:0.76rem;color:var(--text-muted);">Session prediction history</span>
+              <button id="clear-history-btn"
+                      style="font-size:0.68rem;padding:3px 10px;border:1px solid var(--bg-border);border-radius:var(--radius-sm);background:transparent;color:var(--error);cursor:pointer;">
+                Clear
+              </button>
+            </div>
+
+            <div id="history-list">
+              <div class="history-empty">No predictions yet. Run your first inference above.</div>
+            </div>
+
+          </div>
+          <!-- end view-history -->
+
+        </div>
+        <!-- end panel-content -->
+      </aside>
+      <!-- end side-panel -->
+
+    </div>
+    <!-- end workspace -->
+
+    <!-- ══════════════════════════════════════════════════════
+         BOTTOM ROW — AI Recommendations + Chatbot
+    ══════════════════════════════════════════════════════ -->
+    <div id="bottom-row">
+
+      <!-- ╔══════════════════════════════════════════════
+           BOX A — TREE RECOMMENDATIONS + DIFF VIEW
+      ══════════════════════════════════════════════╗ -->
+      <section id="rec-box" aria-label="AI Tree Recommendations">
+
+        <div class="box-header">
+          <h2>🌳 AI Tree Recommendations
+            <span style="font-size:0.72rem;font-weight:400;color:var(--text-muted);">— Diff View</span>
+          </h2>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span class="box-badge" id="rec-count-badge">0 species</span>
+            <button id="rec-reset-btn"
+                    style="font-size:0.68rem;padding:3px 9px;border:1px solid var(--bg-border);border-radius:var(--radius-sm);background:transparent;color:var(--text-muted);cursor:pointer;"
+                    title="Reset recommendations">⟳ Reset</button>
+          </div>
+        </div>
+
+        <div id="rec-content">
+
+          <!-- Filter bar -->
+          <div class="rec-filter-bar">
+            <div>
+              <label for="rec-water">Water Need</label>
+              <select id="rec-water">
+                <option value="Low">💧 Low</option>
+                <option value="Medium">💧💧 Medium</option>
+                <option value="High">💧💧💧 High</option>
+              </select>
+            </div>
+            <div>
+              <label for="rec-cooling">Min Cooling Score</label>
+              <input type="number" id="rec-cooling" min="1" max="10" value="6" />
+            </div>
+            <div>
+              <label for="rec-topn">Top N Results</label>
+              <input type="number" id="rec-topn" min="1" max="10" value="3" />
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;">
+              <label>&nbsp;</label>
+              <button id="rec-run-btn" class="rec-run-btn">
+                <div class="spinner" id="rec-spinner" style="display:none;width:12px;height:12px;margin-right:4px;border-width:1.5px;"></div>
+                🔍 Get Recs
+              </button>
+            </div>
+          </div>
+
+          <!-- Narrow street toggle -->
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <input type="checkbox" id="rec-narrow" style="width:14px;height:14px;accent-color:var(--green-primary);" />
+            <label for="rec-narrow" style="font-size:0.74rem;color:var(--text-secondary);cursor:pointer;">
+              🏙️ Narrow street (deep-root only)
+            </label>
+          </div>
+
+          <!-- ── Diff View: Current State vs Proposed AI Action ── -->
+          <div class="section-label">📊 Scenario Diff View — Before vs After</div>
+
+          <!-- Scenario Impact Diff Stats Bar -->
+          <div class="diff-stats-bar" id="diff-stats-bar">
+            <div class="diff-stat-item">
+              <div class="diff-stat-label">🌡️ Temp Delta</div>
+              <div class="diff-stat-val" id="diff-stat-temp">—</div>
+            </div>
+            <div class="diff-stat-item">
+              <div class="diff-stat-label">🌲 Shading Area</div>
+              <div class="diff-stat-val" id="diff-stat-canopy">—</div>
+            </div>
+            <div class="diff-stat-item">
+              <div class="diff-stat-label">💨 CO₂ Sequestration</div>
+              <div class="diff-stat-val" id="diff-stat-co2">—</div>
+            </div>
+            <div class="diff-stat-item">
+              <div class="diff-stat-label">💧 Water Index</div>
+              <div class="diff-stat-val" id="diff-stat-water">—</div>
+            </div>
+          </div>
+
+          <!-- Decision summary pill bar -->
+          <div class="decision-summary-bar" id="decision-summary-bar">
+            <span style="color:var(--text-muted);font-size:0.68rem;font-weight:600;">Decisions:</span>
+            <span class="decision-pill approved" id="dec-pill-approved">0 Approved</span>
+            <span class="decision-pill modified" id="dec-pill-modified">0 Modified</span>
+            <span class="decision-pill rejected" id="dec-pill-rejected">0 Rejected</span>
+          </div>
+
+          <div class="diff-view" id="diff-view-container">
+            <div class="diff-col before">
+              <div class="diff-col-label">❌ Before — Current State</div>
+              <div class="diff-line removed"><span class="diff-marker minus">−</span> Bare concrete surfaces</div>
+              <div class="diff-line removed"><span class="diff-marker minus">−</span> High urban heat island (+4°C)</div>
+              <div class="diff-line removed"><span class="diff-marker minus">−</span> No canopy cover</div>
+              <div class="diff-line removed"><span class="diff-marker minus">−</span> High road heat absorption</div>
+              <div class="diff-line neutral"><span class="diff-marker eq">≡</span> NDVI: 0.05 (desert)</div>
+              <div class="diff-line neutral"><span class="diff-marker eq">≡</span> Greenery: &lt;2%</div>
+            </div>
+            <div class="diff-col after" id="diff-after-col">
+              <div class="diff-col-label">✅ After — AI Proposed Action</div>
+              <div class="diff-line neutral" style="color:var(--text-muted);font-style:italic;">
+                <span class="diff-marker eq">•</span> Run recommendations to populate
+              </div>
+            </div>
+          </div>
+
+          <!-- Species recommendation cards will be injected here -->
+          <div class="section-label">🏅 Ranked Species Candidates</div>
+          <div id="species-grid" class="species-grid">
+            <div class="rec-empty">
+              <div class="rec-empty-icon">🌱</div>
+              <div>Configure filters and click <strong>Get Recs</strong> to generate AI-ranked tree species for the selected grid cell.</div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+      <!-- end rec-box -->
+
+
+      <!-- ╔══════════════════════════════════════════════
+           BOX B — INTERACTIVE CHATBOT WIDGET
+      ══════════════════════════════════════════════╗ -->
+      <section id="chat-box" aria-label="Zurra Smart Assistant Chatbot">
+
+        <!-- Chat header with Groot avatar -->
+        <div id="chat-header">
+          <img src="assets/I am Groot.png"
+               alt="Zurra Tree Assistant avatar"
+               class="chat-avatar-header"
+               id="chat-avatar-img" />
+          <div class="chat-title-block">
+            <div class="chat-title">Zurra Smart Assistant 🤖</div>
+            <div class="chat-subtitle">
+              <span class="chat-online-dot"></span>
+              LangGraph Multi-Agent — Climate · Law · Trees
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <!-- Language toggle -->
+            <div class="chat-lang-toggle">
+              <button class="lang-btn active" data-lang="ar" id="lang-ar">AR</button>
+              <button class="lang-btn" data-lang="en" id="lang-en">EN</button>
+            </div>
+            <button id="chat-clear-btn" title="Clear chat">🗑</button>
+          </div>
+        </div>
+
+        <!-- Quick-reply chip suggestions -->
+        <div id="chat-chips" role="list" aria-label="Quick reply suggestions">
+          <button class="chip" data-prompt="Analyze the urban heat in Cairo's grid and recommend cooling strategies">
+            🌡️ Analyze Cairo Grid
+          </button>
+          <button class="chip" data-prompt="Check soil health indicators and suggest improvements for urban vegetation">
+            🌱 Check Soil Health
+          </button>
+          <button class="chip" data-prompt="Summarize current temperature trends and their impact on urban greenery">
+            📈 Temp Trends
+          </button>
+          <button class="chip" data-prompt="What are the best low-water trees for narrow streets in Alexandria?">
+            🏙️ Narrow Street Trees
+          </button>
+          <button class="chip" data-prompt="What Egyptian environmental regulations apply to urban tree planting?">
+            ⚖️ Legal Framework
+          </button>
+          <button class="chip" data-prompt="How does NDVI correlate with surface temperature reduction in Cairo?">
+            📡 NDVI vs Temp
+          </button>
+        </div>
+
+        <!-- Message stream -->
+        <div id="chat-messages" role="log" aria-live="polite" aria-label="Chat message stream">
+          <!-- Greeting message injected by JS on init -->
+        </div>
+
+        <!-- Input bar -->
+        <div id="chat-input-bar">
+          <input type="text"
+                 id="chat-input"
+                 placeholder="Ask about trees, climate, or regulations… (اسأل بالعربية أو بالإنجليزية)"
+                 aria-label="Chat message input"
+                 autocomplete="off" />
+          <button id="chat-send-btn" aria-label="Send message" title="Send">➤</button>
+        </div>
+
+      </section>
+      <!-- end chat-box -->
+
+    </div>
+    <!-- end bottom-row -->
+
+  </main>
+
+
+  <!-- ── Toast notification ──────────────────────────────── -->
+  <div id="toast" role="alert" aria-live="assertive">
+    <span class="toast-icon" id="toast-icon">⚠️</span>
+    <span id="toast-msg">An error occurred.</span>
+  </div>
+
+  <!-- ── Leaflet JS ───────────────────────────────────────── -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- ── Main Application Script ─────────────────────────── -->
+  <script src="js/main.js"></script>
+</body>
+</html>

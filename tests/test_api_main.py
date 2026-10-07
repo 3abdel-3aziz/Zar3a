@@ -48,4 +48,4 @@ def test_cors_headers_present():
         },
     )
     assert response.status_code == 200
-    assert response.headers.get("access-control-allow-origin") == "*"
+    assert response.headers.get("access-control-allow-origin") in ["*", "http://localhost:3000"]

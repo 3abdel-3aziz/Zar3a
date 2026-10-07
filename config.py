@@ -1,5 +1,16 @@
 from pathlib import Path
-import os 
+import os
+
+# Project root path
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Ensure HuggingFace and PyTorch cache to Drive D (project folder) to avoid C: disk space limits
+if "HF_HOME" not in os.environ:
+    os.environ["HF_HOME"] = str((PROJECT_ROOT / ".cache" / "huggingface").absolute())
+if "TORCH_HOME" not in os.environ:
+    os.environ["TORCH_HOME"] = str((PROJECT_ROOT / ".cache" / "torch").absolute())
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 # Base Data Directory for raw inputs (PDFs, raw documents, etc.)
 DATA_DIR: Path = Path("Data")
 

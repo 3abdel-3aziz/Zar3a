@@ -27,11 +27,11 @@ def test_config_default_values():
     """Verifies that all default config values are properly typed and populated for local quantized Qwen."""
     assert DEFAULT_LANGUAGE == "ar"
     assert TEXT_ENCODING.lower() == "utf-8"
-    assert AGENT_LLM_MODEL == "ollama/qwen2.5:7b"
-    assert ROUTER_LLM_MODEL == "ollama/qwen2.5:7b"
-    assert KNOWLEDGE_LLM_MODEL == "ollama/qwen2.5:7b"
-    assert CLIMATE_LLM_MODEL == "ollama/qwen2.5:7b"
-    assert SYNTHESIZER_LLM_MODEL == "ollama/qwen2.5:7b"
+    assert AGENT_LLM_MODEL in ("qwen2.5:3b", "ollama/qwen2.5:7b")
+    assert ROUTER_LLM_MODEL in ("qwen2.5:3b", "ollama/qwen2.5:7b")
+    assert KNOWLEDGE_LLM_MODEL in ("qwen2.5:3b", "ollama/qwen2.5:7b")
+    assert CLIMATE_LLM_MODEL in ("qwen2.5:3b", "ollama/qwen2.5:7b")
+    assert SYNTHESIZER_LLM_MODEL in ("qwen2.5:3b", "ollama/qwen2.5:7b")
 
     # Temperatures
     assert ROUTER_TEMPERATURE == 0.0

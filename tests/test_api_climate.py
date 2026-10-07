@@ -7,8 +7,10 @@ Tests for the /api/v1/climate RESTful endpoints using TestClient.
 from fastapi.testclient import TestClient
 import pytest
 
-from src.api.dependencies import get_climate_predictor
-from src.api.main import app
+# Import from the same module path the router uses (api.dependencies, not src.api.dependencies)
+# to ensure dependency_overrides maps to the correct Python object key.
+from api.dependencies import get_climate_predictor
+from api.main import app
 
 client = TestClient(app)
 
@@ -44,7 +46,8 @@ def test_predict_climate_valid():
     data = response.json()
     assert data["target_variable"] == "mean_temperature"
     assert data["predicted_mean_temp_c"] == 31.85
-    assert data["cooling_potential_c"] == -2.40
+    # cooling_potential_c is passed through round(float(cooling_val), 2) in the router
+    assert data["cooling_potential_c"] == -2.4
     assert data["status"] == "success"
 
 

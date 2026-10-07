@@ -117,5 +117,48 @@ def test_processor_stats_tracking(mock_pdf_path, tmp_path, monkeypatch):
     stats = processor.get_processing_stats()
     assert "cache_hits" in stats
     assert "local_text_hits" in stats
+    assert "surya_ocr_hits" in stats
     assert "ocr_api_hits" in stats
     assert "failures" in stats
+
+
+def test_surya_blocks_to_markdown():
+    from src.ingestion.ocr_loader import SuryaOCRExtractor
+    
+    # Mock blocks returned by Surya
+    mock_header = MagicMock(skipped=False, error=False, label="SectionHeader", html="العنوان الرئيسي")
+    mock_text = MagicMock(skipped=False, error=False, label="Text", html="هذا نص تجريبي للزراعة.")
+    mock_skipped = MagicMock(skipped=True, error=False, label="Picture", html="[image]")
+    
+    md = SuryaOCRExtractor._blocks_to_markdown([mock_header, mock_text, mock_skipped])
+    assert "## العنوان الرئيسي" in md
+    assert "هذا نص تجريبي للزراعة." in md
+    assert "[image]" not in md
+
+
+def test_processor_surya_engine_mocked(mock_pdf_path, tmp_path):
+    cache_dir = tmp_path / "processed_ocr"
+
+    with patch("src.ingestion.ocr_loader.SuryaOCRExtractor") as MockSurya:
+        mock_instance = MagicMock()
+        mock_instance.extract_text.return_value = {
+            "pages": [{"index": 0, "markdown": "محتوى مقروء عبر Surya"}],
+            "source": "surya_ocr_local",
+        }
+        MockSurya.return_value = mock_instance
+
+        processor = MistralPDFProcessor(
+            output_dir=cache_dir,
+            ocr_engine="surya",
+            inter_file_delay=0.0,
+        )
+
+        assert processor.ocr_engine == "surya"
+        assert processor.surya_extractor is mock_instance
+
+        # Test process_pdf with mocked local text returning None
+        with patch.object(processor.local_extractor, "extract_text", return_value=None):
+            result = processor.process_pdf(mock_pdf_path)
+            assert result["source"] == "surya_ocr_local"
+            assert result["pages"][0]["markdown"] == "محتوى مقروء عبر Surya"
+            assert processor.stats["surya_ocr_hits"] == 1
